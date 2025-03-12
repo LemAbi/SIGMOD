@@ -3,9 +3,9 @@
 
 #include "../build/_deps/tracy-src/public/tracy/Tracy.hpp"
 
-#include <thread>
 #include <atomic>
 #include <cstdint>
+#include <thread>
 #include <vector>
 
 namespace Contest {
@@ -163,17 +163,29 @@ ExecuteResult execute_scan(const Plan&               plan,
     const ScanNode&                                  scan,
     const std::vector<std::tuple<size_t, DataType>>& output_attrs) {
     ZoneScoped;
-    auto  table_id = scan.base_table_id;
-    auto& input    = plan.inputs[table_id];
-    auto  table    = Table::from_columnar(input);
-    std::vector<std::vector<Data>> results;
-    for (auto& record: table.table()) {
-        std::vector<Data> new_record;
-        new_record.reserve(output_attrs.size());
-        for (auto [col_idx, _]: output_attrs) {
-            new_record.emplace_back(record[col_idx]);
+    auto                            table_id = scan.base_table_id;
+    auto&                           input    = plan.inputs[table_id];
+    auto                            table    = Table::from_columnar(input);
+    std::vector<std::vector<Data>>  results;
+    std::vector<std::vector<Data>>& input_data  = table.table();
+    size_t                          collumn_cnt = output_attrs.size();
+    size_t                          record_cnt  = input_data.size();
+
+    // NOTE: the output type here is really dumb... This could all be a single
+    // piece of memory and also thus a single allocation, but no let's use
+    // a vector of vector....
+    // Also transposing the table for no reason is insane
+    // TODO: check if we can replace ExecuteResult everywhere with one piece of memory and also
+    // flip the table orientation back to column oriented
+    results.resize(record_cnt);
+    for (size_t i = 0; i < record_cnt; i += 1) {
+        results[i].resize(collumn_cnt);
+    }
+    for (size_t i = 0; i < record_cnt; i += 1) {
+        for (size_t j = 0; j < collumn_cnt; j += 1) {
+            size_t column_id = std::get<0>(output_attrs[j]);
+            results[i][j]    = input_data[i][column_id];
         }
-        results.emplace_back(std::move(new_record));
     }
     return results;
 }
