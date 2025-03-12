@@ -1,6 +1,8 @@
 #include <plan.h>
 #include <table.h>
 
+#include "../build/_deps/tracy-src/public/tracy/Tracy.hpp"
+
 namespace Contest {
 
 using ExecuteResult = std::vector<std::vector<Data>>;
@@ -17,6 +19,7 @@ struct JoinAlgorithm {
 
     template <class T>
     auto run() {
+        ZoneScoped;
         namespace views = ranges::views;
         std::unordered_map<T, std::vector<size_t>> hash_table;
         if (build_left) {
@@ -114,6 +117,7 @@ struct JoinAlgorithm {
 ExecuteResult execute_hash_join(const Plan&          plan,
     const JoinNode&                                  join,
     const std::vector<std::tuple<size_t, DataType>>& output_attrs) {
+    ZoneScoped;
     auto                           left_idx    = join.left;
     auto                           right_idx   = join.right;
     auto&                          left_node   = plan.nodes[left_idx];
@@ -153,9 +157,10 @@ ExecuteResult execute_hash_join(const Plan&          plan,
 ExecuteResult execute_scan(const Plan&               plan,
     const ScanNode&                                  scan,
     const std::vector<std::tuple<size_t, DataType>>& output_attrs) {
-    auto                           table_id = scan.base_table_id;
-    auto&                          input    = plan.inputs[table_id];
-    auto                           table    = Table::from_columnar(input);
+    ZoneScoped;
+    auto  table_id = scan.base_table_id;
+    auto& input    = plan.inputs[table_id];
+    auto  table    = Table::from_columnar(input);
     std::vector<std::vector<Data>> results;
     for (auto& record: table.table()) {
         std::vector<Data> new_record;
@@ -169,6 +174,7 @@ ExecuteResult execute_scan(const Plan&               plan,
 }
 
 ExecuteResult execute_impl(const Plan& plan, size_t node_idx) {
+    ZoneScoped;
     auto& node = plan.nodes[node_idx];
     return std::visit(
         [&](const auto& value) {
@@ -183,6 +189,7 @@ ExecuteResult execute_impl(const Plan& plan, size_t node_idx) {
 }
 
 ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
+    ZoneScoped;
     namespace views = ranges::views;
     auto ret        = execute_impl(plan, plan.root);
     auto ret_types  = plan.nodes[plan.root].output_attrs
