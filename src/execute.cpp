@@ -3,6 +3,11 @@
 
 #include "../build/_deps/tracy-src/public/tracy/Tracy.hpp"
 
+#include <thread>
+#include <atomic>
+#include <cstdint>
+#include <vector>
+
 namespace Contest {
 
 using ExecuteResult = std::vector<std::vector<Data>>;
@@ -199,10 +204,116 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
     return table.to_columnar();
 }
 
-void* build_context() {
-    return nullptr;
+enum class WorkItemType {
+    Scan,
+    Join,
+};
+
+struct ScanInfo {
+    uint64_t               start_id;
+    uint64_t               item_count;
+    std::atomic<uint32_t>* completion_ctr;
+};
+
+struct JoinInfo {};
+
+union WorkItemInfo {
+    ScanInfo scan;
+    JoinInfo join;
+};
+
+struct WorkItem {
+    WorkItemType work_type;
+    WorkItemInfo work_info;
+};
+
+void ExecuteJoinTasklet(JoinInfo* info) {
+    ZoneScoped;
 }
 
-void destroy_context([[maybe_unused]] void* context) {}
+void ExecuteScanTasklet(ScanInfo* info) {
+    ZoneScoped;
+}
+
+void ExecuteWorkItem(WorkItem* work) {
+    ZoneScoped;
+    switch (work->work_type) {
+    case WorkItemType::Join: ExecuteJoinTasklet(&work->work_info.join); break;
+    case WorkItemType::Scan: ExecuteScanTasklet(&work->work_info.scan); break;
+    }
+}
+
+struct ExecContext;
+void WorkerEventLoop(uint32_t thread_id, ExecContext* ctx);
+
+struct ExecContext {
+    std::vector<std::thread> worker;
+    std::vector<WorkItem>    work_stack;
+    std::mutex               work_access_lck;
+    std::atomic<uint32_t>    work_item_count;
+    std::atomic<bool>        shutdown_requested;
+
+    ExecContext()
+    : worker()
+    , work_stack()
+    , work_access_lck()
+    , work_item_count(0)
+    , shutdown_requested(false) {
+        unsigned int worker_cnt = std::thread::hardware_concurrency() - 1;
+        worker.reserve(worker_cnt);
+        for (uint32_t i = 0; i < worker_cnt; i += 1) {
+            worker.push_back(std::move(std::thread(WorkerEventLoop, i, this)));
+        }
+    }
+
+    ~ExecContext() {
+        std::atomic_store_explicit(&shutdown_requested, true, std::memory_order_relaxed);
+        for (uint32_t i = 0; i < worker.size(); i += 1) {
+            worker[i].join();
+        }
+    }
+};
+
+void WorkerEventLoop(uint32_t thread_id, ExecContext* ctx) {
+    ZoneScoped;
+    std::mutex*            q_lck           = &ctx->work_access_lck;
+    std::atomic<uint32_t>* work_count      = &ctx->work_item_count;
+    std::atomic<bool>*     should_shutdown = &ctx->shutdown_requested;
+
+    while (
+        !std::atomic_load_explicit(should_shutdown, std::memory_order::memory_order_relaxed)) {
+        // No need to check the shutdown flag every time -> this loop
+        for (size_t i = 0; i < 1000; i += 1) {
+            uint32_t possibly_available_items =
+                std::atomic_load_explicit(work_count, std::memory_order_relaxed);
+            if (possibly_available_items != 0) {
+                if (q_lck->try_lock()) {
+                    if (!ctx->work_stack.empty()) {
+                        WorkItem allocated_work = ctx->work_stack.back();
+                        ctx->work_stack.pop_back();
+                        std::atomic_fetch_sub_explicit(work_count,
+                            1,
+                            std::memory_order_relaxed);
+                        q_lck->unlock();
+                        ExecuteWorkItem(&allocated_work);
+                    } else {
+                        q_lck->unlock();
+                    }
+                }
+            }
+        }
+    }
+}
+
+void* build_context() {
+    ZoneScoped;
+    return new ExecContext();
+}
+
+void destroy_context(void* context) {
+    ZoneScoped;
+    ExecContext* ctx = static_cast<ExecContext*>(context);
+    delete ctx;
+}
 
 } // namespace Contest
