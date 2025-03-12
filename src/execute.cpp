@@ -1,3 +1,4 @@
+#include <cstddef>
 #include <cstring>
 #include <plan.h>
 #include <table.h>
@@ -7,6 +8,7 @@
 #include <atomic>
 #include <cstdint>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace Contest {
@@ -14,6 +16,55 @@ namespace Contest {
 using ExecuteResult = std::vector<std::vector<Data>>;
 
 ExecuteResult execute_impl(const Plan& plan, size_t node_idx);
+
+template <typename T>
+void BuildHashTbl(ExecuteResult&                input_tbl,
+    size_t                                      col_id,
+    std::unordered_map<T, std::vector<size_t>>& tbl) {
+    ZoneScoped;
+    size_t record_cnt = input_tbl.size();
+    for (size_t i = 0; i < record_cnt; i += 1) {
+        T& key = std::get<T>(input_tbl[i][col_id]);
+        if (auto itr = tbl.find(key); itr == tbl.end()) {
+            tbl.emplace(key, std::vector<size_t>(1, i));
+        } else {
+            itr->second.push_back(i);
+        }
+    }
+}
+
+template <typename T>
+void Probe(ExecuteResult&                       non_hashed_in,
+    ExecuteResult&                              hashed_in,
+    size_t                                      col_id_of_non_hashed_in,
+    std::unordered_map<T, std::vector<size_t>>& tbl,
+    ExecuteResult&                              results,
+    const std::vector<std::tuple<size_t, DataType>>& output_attrs) {
+    ZoneScoped;
+    size_t record_cnt = non_hashed_in.size();
+    for (size_t i = 0; i < record_cnt; i += 1) {
+		auto& record_l = non_hashed_in[i];
+        T& key = std::get<T>(record_l[col_id_of_non_hashed_in]);
+        if (auto itr = tbl.find(key); itr != tbl.end()) {
+            size_t match_count = itr->second.size();
+            for (size_t j = 0; j < match_count; j += 1) {
+                auto&                record = hashed_in[itr->second[j]];
+				size_t attr_cnt = output_attrs.size();
+				size_t hashed_in_attr_cnt = record.size();
+
+                std::vector<Data> new_record;
+                new_record.reserve(output_attrs.size());
+				for(size_t k=0; k<hashed_in_attr_cnt; k+=1) {
+					new_record.emplace_back(record[std::get<0>(output_attrs[k])]);
+				}
+				for(size_t k=hashed_in_attr_cnt; k<attr_cnt; k+=1) {
+					new_record.emplace_back(record_l[std::get<0>(output_attrs[k])]);
+				}
+                results.emplace_back(std::move(new_record));
+            }
+        }
+    }
+}
 
 // TODO: remove ExecuteResult type and use Columnar table as well here
 struct JoinAlgorithm {
@@ -27,96 +78,13 @@ struct JoinAlgorithm {
     template <class T>
     auto run() {
         ZoneScoped;
-        namespace views = ranges::views;
         std::unordered_map<T, std::vector<size_t>> hash_table;
         if (build_left) {
-            for (auto&& [idx, record]: left | views::enumerate) {
-                std::visit(
-                    [&hash_table, idx = idx](const auto& key) {
-                        using Tk = std::decay_t<decltype(key)>;
-                        if constexpr (std::is_same_v<Tk, T>) {
-                            if (auto itr = hash_table.find(key); itr == hash_table.end()) {
-                                hash_table.emplace(key, std::vector<size_t>(1, idx));
-                            } else {
-                                itr->second.push_back(idx);
-                            }
-                        } else if constexpr (not std::is_same_v<Tk, std::monostate>) {
-                            throw std::runtime_error("wrong type of field");
-                        }
-                    },
-                    record[left_col]);
-            }
-            for (auto& right_record: right) {
-                std::visit(
-                    [&](const auto& key) {
-                        using Tk = std::decay_t<decltype(key)>;
-                        if constexpr (std::is_same_v<Tk, T>) {
-                            if (auto itr = hash_table.find(key); itr != hash_table.end()) {
-                                for (auto left_idx: itr->second) {
-                                    auto&             left_record = left[left_idx];
-                                    std::vector<Data> new_record;
-                                    new_record.reserve(output_attrs.size());
-                                    for (auto [col_idx, _]: output_attrs) {
-                                        if (col_idx < left_record.size()) {
-                                            new_record.emplace_back(left_record[col_idx]);
-                                        } else {
-                                            new_record.emplace_back(
-                                                right_record[col_idx - left_record.size()]);
-                                        }
-                                    }
-                                    results.emplace_back(std::move(new_record));
-                                }
-                            }
-                        } else if constexpr (not std::is_same_v<Tk, std::monostate>) {
-                            throw std::runtime_error("wrong type of field");
-                        }
-                    },
-                    right_record[right_col]);
-            }
+            BuildHashTbl(left, left_col, hash_table);
+			Probe(right, left, right_col, hash_table, results,output_attrs);
         } else {
-            for (auto&& [idx, record]: right | views::enumerate) {
-                std::visit(
-                    [&hash_table, idx = idx](const auto& key) {
-                        using Tk = std::decay_t<decltype(key)>;
-                        if constexpr (std::is_same_v<Tk, T>) {
-                            if (auto itr = hash_table.find(key); itr == hash_table.end()) {
-                                hash_table.emplace(key, std::vector<size_t>(1, idx));
-                            } else {
-                                itr->second.push_back(idx);
-                            }
-                        } else if constexpr (not std::is_same_v<Tk, std::monostate>) {
-                            throw std::runtime_error("wrong type of field");
-                        }
-                    },
-                    record[right_col]);
-            }
-            for (auto& left_record: left) {
-                std::visit(
-                    [&](const auto& key) {
-                        using Tk = std::decay_t<decltype(key)>;
-                        if constexpr (std::is_same_v<Tk, T>) {
-                            if (auto itr = hash_table.find(key); itr != hash_table.end()) {
-                                for (auto right_idx: itr->second) {
-                                    auto&             right_record = right[right_idx];
-                                    std::vector<Data> new_record;
-                                    new_record.reserve(output_attrs.size());
-                                    for (auto [col_idx, _]: output_attrs) {
-                                        if (col_idx < left_record.size()) {
-                                            new_record.emplace_back(left_record[col_idx]);
-                                        } else {
-                                            new_record.emplace_back(
-                                                right_record[col_idx - left_record.size()]);
-                                        }
-                                    }
-                                    results.emplace_back(std::move(new_record));
-                                }
-                            }
-                        } else if constexpr (not std::is_same_v<Tk, std::monostate>) {
-                            throw std::runtime_error("wrong type of field");
-                        }
-                    },
-                    left_record[left_col]);
-            }
+            BuildHashTbl(right, right_col, hash_table);
+			Probe(left, right, left_col, hash_table, results,output_attrs);
         }
     }
 };
