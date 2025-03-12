@@ -1,3 +1,4 @@
+#include <cstring>
 #include <plan.h>
 #include <table.h>
 
@@ -14,6 +15,7 @@ using ExecuteResult = std::vector<std::vector<Data>>;
 
 ExecuteResult execute_impl(const Plan& plan, size_t node_idx);
 
+// TODO: remove ExecuteResult type and use Columnar table as well here
 struct JoinAlgorithm {
     bool                                             build_left;
     ExecuteResult&                                   left;
@@ -163,27 +165,58 @@ ExecuteResult execute_scan(const Plan&               plan,
     const ScanNode&                                  scan,
     const std::vector<std::tuple<size_t, DataType>>& output_attrs) {
     ZoneScoped;
-    auto                            table_id = scan.base_table_id;
-    auto&                           input    = plan.inputs[table_id];
-    auto                            table    = Table::from_columnar(input);
+    auto   table_id          = scan.base_table_id;
+    auto&  input_all_columns = plan.inputs[table_id];
+    size_t column_cnt        = output_attrs.size();
+    size_t record_cnt        = input_all_columns.num_rows;
+
+    ColumnarTable input_relevant_columns;
+    input_relevant_columns.num_rows = record_cnt;
+    input_relevant_columns.columns.reserve(column_cnt);
+    for (size_t i = 0; i < column_cnt; i += 1) {
+        size_t select_col_id = std::get<0>(output_attrs[i]);
+        input_relevant_columns.columns.emplace_back(
+            input_all_columns.columns[select_col_id].type);
+        size_t page_cnt = input_all_columns.columns[select_col_id].pages.size();
+
+        // NOTE: cpy here for now
+        // 1. first reason input data is declared as const
+        //  -> we could change that
+        // 2. second reason: the stupid RAII shit here disallows us to simply
+        //  reuse the page ptrs until we do modifications on it *if* we want to
+        //  keep reusing the ColumnarTable type (we need to use that at least in
+        //  the very last step, as execute() returns that -> at the very least one
+        //  copy there) otherwise we would double free and if we would move from the
+        //  input data, we can no longer use that as input for further queries (do we
+        //  use tables multiple times as inputs?)
+        // NOTE: if we keep the copying here this *may* benefit from parallelism
+        for (size_t j = 0; j < page_cnt; j += 1) {
+            input_relevant_columns.columns[i].new_page();
+            void* src  = &input_all_columns.columns[select_col_id].pages[j]->data[0];
+            void* dest = &input_relevant_columns.columns[i].pages[j]->data[0];
+            std::memcpy(dest, src, PAGE_SIZE);
+        }
+    }
+
+    // NOTE: For now do the pointless transpose here
+    // Once the join can handle ColumnarTable or smth similar we can just return here
+
+    auto                            table = Table::from_columnar(input_relevant_columns);
     std::vector<std::vector<Data>>  results;
-    std::vector<std::vector<Data>>& input_data  = table.table();
-    size_t                          collumn_cnt = output_attrs.size();
-    size_t                          record_cnt  = input_data.size();
+    std::vector<std::vector<Data>>& input_data = table.table();
 
     // NOTE: the output type here is really dumb... This could all be a single
-    // piece of memory and also thus a single allocation, but no let's use
-    // a vector of vector....
-    // Also transposing the table for no reason is insane
+    // piece of memory and also thus a single allocation (or at least a lot fewer), but no let's
+    // use a vector of vector.... Also transposing the table for no reason is insane
     // TODO: check if we can replace ExecuteResult everywhere with one piece of memory and also
     // flip the table orientation back to column oriented
     results.resize(record_cnt);
     for (size_t i = 0; i < record_cnt; i += 1) {
-        results[i].resize(collumn_cnt);
+        results[i].resize(column_cnt);
     }
     for (size_t i = 0; i < record_cnt; i += 1) {
-        for (size_t j = 0; j < collumn_cnt; j += 1) {
-            size_t column_id = std::get<0>(output_attrs[j]);
+        for (size_t j = 0; j < column_cnt; j += 1) {
+            size_t column_id = j;
             results[i][j]    = input_data[i][column_id];
         }
     }
