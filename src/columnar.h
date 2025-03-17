@@ -75,40 +75,54 @@ static PageDescriptor ParsePage(Page* page, DataType data_type) {
 }
 
 enum class PageOwnerShip {
-	InputPage,
-	Owning,
-	NonOwning,
+    InputPage,
+    Owning,
+    NonOwning,
+};
+
+struct TrackedPage {
+    Page* page;
+    // Used when filling in new pages to avoid re-calculating a bunch of shit
+    PageDescriptor page_info;
+    PageOwnerShip  ownership;
 };
 
 struct SensibleColumn {
-    DataType           type;
-    std::vector<Page*> pages;
-    // Used when filling in new pages to avoid re-calculating a bunch of shit
-    std::vector<PageDescriptor> page_meta;
-    std::vector<PageOwnerShip>           owns_pages;
+    DataType                 type;
+    std::vector<TrackedPage> pages;
 
-    void AddPage() {
+    void AddEmptyPage() {
         Page*     page                                  = new Page;
         uint16_t* page_u16                              = reinterpret_cast<uint16_t*>(page);
         page_u16[0]                                     = 0;
         page_u16[1]                                     = 0;
         reinterpret_cast<uint8_t*>(page)[PAGE_SIZE - 1] = 0; // Clear bitmap byte
-        pages.push_back(page);
         uint16_t begin_offset = type == DataType::VARCHAR ? 4 : AlingDTOffset(type);
-        page_meta.push_back({0, 0, 1, 8, begin_offset});
-        owns_pages.push_back(PageOwnerShip::Owning);
+        pages.push_back({
+            page,
+            {0, 0, 1, 8, begin_offset},
+            PageOwnerShip::Owning
+        });
+    }
+
+    void AddPageCopy(Page* in_page) {
+        Page* page = new Page;
+        memcpy(page, in_page, PAGE_SIZE);
+        pages.push_back({page, ParsePage(in_page, type), PageOwnerShip::Owning});
+    }
+
+    void AddInputPage(Page* input_page) {
+        pages.push_back({input_page, ParsePage(input_page, type), PageOwnerShip::InputPage});
     }
 
     SensibleColumn(DataType data_type)
     : type(data_type)
-    , pages()
-    , page_meta()
-    , owns_pages() {}
+    , pages() {}
 
     ~SensibleColumn() {
         for (size_t i = 0; i < pages.size(); i += 1) {
-            if (owns_pages[i] == PageOwnerShip::Owning) {
-                delete pages[i];
+            if (pages[i].ownership == PageOwnerShip::Owning) {
+                delete pages[i].page;
             }
         }
     }
@@ -136,43 +150,42 @@ static void AddByteToBitmap(uint8_t** bitmap, PageDescriptor* page_info) {
 template <typename T>
 void AppendValue(T* value, SensibleColumn& clm) {
     if (clm.pages.size() == 0) {
-        clm.AddPage();
+        clm.AddEmptyPage();
     }
-    PageDescriptor& page_info = clm.page_meta.back();
-    Page*           page      = clm.pages.back();
+    TrackedPage& page = clm.pages.back();
 
-    uint16_t bytes_used = page_info.curr_next_data_begin_offset + page_info.bitmap_size;
-    bool     will_need_new_bitmap_byte = page_info.curr_free_slots_in_last_bitmap_byte == 0;
-    uint16_t new_bytes_for_bitmap      = will_need_new_bitmap_byte ? 1 : 0;
-    uint16_t bytes_required            = bytes_used + sizeof(T) + new_bytes_for_bitmap;
+    uint16_t bytes_used =
+        page.page_info.curr_next_data_begin_offset + page.page_info.bitmap_size;
+    bool will_need_new_bitmap_byte = page.page_info.curr_free_slots_in_last_bitmap_byte == 0;
+    uint16_t new_bytes_for_bitmap  = will_need_new_bitmap_byte ? 1 : 0;
+    uint16_t bytes_required        = bytes_used + sizeof(T) + new_bytes_for_bitmap;
 
     if (bytes_required > PAGE_SIZE) {
-        clm.AddPage();
+        clm.AddEmptyPage();
         page                      = clm.pages.back();
-        page_info                 = clm.page_meta.back();
         will_need_new_bitmap_byte = false;
     }
 
     void* current_start =
-        &(reinterpret_cast<uint8_t*>(page)[page_info.curr_next_data_begin_offset]);
+        &(reinterpret_cast<uint8_t*>(page.page)[page.page_info.curr_next_data_begin_offset]);
     reinterpret_cast<T*>(current_start)[0] = *value;
-    uint16_t* page_u16                     = reinterpret_cast<uint16_t*>(page);
+    uint16_t* page_u16                     = reinterpret_cast<uint16_t*>(page.page);
     page_u16[0]++;
     page_u16[1]++;
 
-    uint8_t* bitmap_start = page_info.BitMapBegin(page);
+    uint8_t* bitmap_start = page.page_info.BitMapBegin(page.page);
     if (will_need_new_bitmap_byte) {
-        AddByteToBitmap(&bitmap_start, &page_info);
+        AddByteToBitmap(&bitmap_start, &page.page_info);
     }
 
-    uint16_t byte_id       = (page_info.rows_in_page & (~bottom_three_bits_mask)) >> 3;
-    uint8_t  bit_id        = page_info.rows_in_page & bottom_three_bits_mask;
+    uint16_t byte_id       = (page.page_info.rows_in_page & (~bottom_three_bits_mask)) >> 3;
+    uint8_t  bit_id        = page.page_info.rows_in_page & bottom_three_bits_mask;
     bitmap_start[byte_id] |= (1 << bit_id);
 
-    page_info.curr_next_data_begin_offset += sizeof(T);
-    page_info.non_null_in_page++;
-    page_info.rows_in_page++;
-    page_info.curr_free_slots_in_last_bitmap_byte -= 1;
+    page.page_info.curr_next_data_begin_offset += sizeof(T);
+    page.page_info.non_null_in_page++;
+    page.page_info.rows_in_page++;
+    page.page_info.curr_free_slots_in_last_bitmap_byte -= 1;
 }
 
 template <>
@@ -181,18 +194,16 @@ template <>
 void AppendValue<char*>(char** value, SensibleColumn& clm) = delete;
 
 static void AppendLargStr(char* value, size_t space_for_value, SensibleColumn& clm) {
-    PageDescriptor& page_info = clm.page_meta.back();
-    Page*           page      = clm.pages.back();
+    TrackedPage& page = clm.pages.back();
 
-    if (page_info.rows_in_page != 0) {
-        clm.AddPage();
-        page      = clm.pages.back();
-        page_info = clm.page_meta.back();
+    if (page.page_info.rows_in_page != 0) {
+        clm.AddEmptyPage();
+        page = clm.pages.back();
     }
-    uint16_t* page_u16     = reinterpret_cast<uint16_t*>(page);
-    uint8_t*  page_u8      = reinterpret_cast<uint8_t*>(page);
-    page_info.rows_in_page = is_first_big_str_page;
-    page_u16[0]            = is_first_big_str_page;
+    uint16_t* page_u16          = reinterpret_cast<uint16_t*>(page.page);
+    uint8_t*  page_u8           = reinterpret_cast<uint8_t*>(page.page);
+    page.page_info.rows_in_page = is_first_big_str_page;
+    page_u16[0]                 = is_first_big_str_page;
 
     size_t consumed_bytes = 0;
     while (true) {
@@ -205,13 +216,12 @@ static void AppendLargStr(char* value, size_t space_for_value, SensibleColumn& c
 
         consumed_bytes += bytes_for_this_page;
         if (consumed_bytes < space_for_value) {
-            clm.AddPage();
-            page                   = clm.pages.back();
-            page_info              = clm.page_meta.back();
-            page_u16               = reinterpret_cast<uint16_t*>(page);
-            page_u8                = reinterpret_cast<uint8_t*>(page);
-            page_info.rows_in_page = is_subsequent_big_str_page;
-            page_u16[0]            = is_subsequent_big_str_page;
+            clm.AddEmptyPage();
+            page                        = clm.pages.back();
+            page_u16                    = reinterpret_cast<uint16_t*>(page.page);
+            page_u8                     = reinterpret_cast<uint8_t*>(page.page);
+            page.page_info.rows_in_page = is_subsequent_big_str_page;
+            page_u16[0]                 = is_subsequent_big_str_page;
         } else {
             break;
         }
@@ -220,7 +230,7 @@ static void AppendLargStr(char* value, size_t space_for_value, SensibleColumn& c
 
 static void AppendStr(void* value, size_t str_len, SensibleColumn& clm) {
     if (clm.pages.size() == 0) {
-        clm.AddPage();
+        clm.AddEmptyPage();
     }
 
     if (str_len >= (PAGE_SIZE - 7)) {
@@ -228,31 +238,31 @@ static void AppendStr(void* value, size_t str_len, SensibleColumn& clm) {
         return;
     }
 
-    PageDescriptor& page_info  = clm.page_meta.back();
-    Page*           page       = clm.pages.back();
-    uint16_t        bytes_used = page_info.curr_next_data_begin_offset + page_info.bitmap_size;
-    bool     will_need_new_bitmap_byte = page_info.curr_free_slots_in_last_bitmap_byte == 0;
-    uint16_t new_bytes_for_bitmap      = will_need_new_bitmap_byte ? 1 : 0;
+    TrackedPage& page = clm.pages.back();
+    uint16_t     bytes_used =
+        page.page_info.curr_next_data_begin_offset + page.page_info.bitmap_size;
+    bool will_need_new_bitmap_byte = page.page_info.curr_free_slots_in_last_bitmap_byte == 0;
+    uint16_t new_bytes_for_bitmap  = will_need_new_bitmap_byte ? 1 : 0;
     uint16_t bytes_required =
         bytes_used + str_len + new_bytes_for_bitmap + 2; // 2 for offset array slot
 
     if (bytes_required > PAGE_SIZE) {
-        clm.AddPage();
+        clm.AddEmptyPage();
         page                      = clm.pages.back();
-        page_info                 = clm.page_meta.back();
         will_need_new_bitmap_byte = false;
     }
 
-    uint16_t* page_u16  = reinterpret_cast<uint16_t*>(page);
-    char*     page_char = reinterpret_cast<char*>(page);
+    uint16_t* page_u16  = reinterpret_cast<uint16_t*>(page.page);
+    char*     page_char = reinterpret_cast<char*>(page.page);
 
-    uint16_t prev_offset =
-        page_info.non_null_in_page == 0 ? 0 : page_u16[2 + (page_info.non_null_in_page - 1)];
+    uint16_t prev_offset = page.page_info.non_null_in_page == 0
+                             ? 0
+                             : page_u16[2 + (page.page_info.non_null_in_page - 1)];
     // TODO: this sucks...
     // shift existing strs out of the way for new offset array entry
     // aliasing -> no memcpy
-    uint16_t old_start = (page_info.rows_in_page + 2) * 2;
-    uint16_t old_end   = page_info.curr_next_data_begin_offset;
+    uint16_t old_start = (page.page_info.rows_in_page + 2) * 2;
+    uint16_t old_end   = page.page_info.curr_next_data_begin_offset;
     uint16_t to_move   = old_end - old_start;
     uint16_t moved     = 0;
     char*    src       = &(page_char[old_end - 1]);
@@ -261,60 +271,59 @@ static void AppendStr(void* value, size_t str_len, SensibleColumn& clm) {
         src--;
         moved++;
     }
-    page_info.curr_next_data_begin_offset += 2;
+    page.page_info.curr_next_data_begin_offset += 2;
 
-    page_u16[2 + page_info.non_null_in_page] = str_len + prev_offset;
-    memcpy(&(page_char[page_info.curr_next_data_begin_offset]), value, str_len);
+    page_u16[2 + page.page_info.non_null_in_page] = str_len + prev_offset;
+    memcpy(&(page_char[page.page_info.curr_next_data_begin_offset]), value, str_len);
 
     page_u16[0]++;
     page_u16[1]++;
 
-    uint8_t* bitmap_start = page_info.BitMapBegin(page);
+    uint8_t* bitmap_start = page.page_info.BitMapBegin(page.page);
     if (will_need_new_bitmap_byte) {
-        AddByteToBitmap(&bitmap_start, &page_info);
+        AddByteToBitmap(&bitmap_start, &page.page_info);
     }
 
-    uint16_t byte_id       = (page_info.rows_in_page & (~bottom_three_bits_mask)) >> 3;
-    uint8_t  bit_id        = page_info.rows_in_page & bottom_three_bits_mask;
+    uint16_t byte_id       = (page.page_info.rows_in_page & (~bottom_three_bits_mask)) >> 3;
+    uint8_t  bit_id        = page.page_info.rows_in_page & bottom_three_bits_mask;
     bitmap_start[byte_id] |= (1 << bit_id);
 
-    page_info.non_null_in_page++;
-    page_info.rows_in_page++;
-    page_info.curr_next_data_begin_offset         += str_len;
-    page_info.curr_free_slots_in_last_bitmap_byte -= 1;
+    page.page_info.non_null_in_page++;
+    page.page_info.rows_in_page++;
+    page.page_info.curr_next_data_begin_offset         += str_len;
+    page.page_info.curr_free_slots_in_last_bitmap_byte -= 1;
 }
 
 static void AppendNull(SensibleColumn& clm) {
     if (clm.pages.size() == 0) {
-        clm.AddPage();
+        clm.AddEmptyPage();
     }
-    PageDescriptor& page_info = clm.page_meta.back();
-    Page*           page      = clm.pages.back();
+    TrackedPage& page = clm.pages.back();
 
-    uint16_t bytes_used = page_info.curr_next_data_begin_offset + page_info.bitmap_size;
-    bool     will_need_new_bitmap_byte = page_info.curr_free_slots_in_last_bitmap_byte == 0;
+    uint16_t bytes_used = page.page_info.curr_next_data_begin_offset + page.page_info.bitmap_size;
+    bool     will_need_new_bitmap_byte = page.page_info.curr_free_slots_in_last_bitmap_byte == 0;
     uint16_t new_bytes_for_bitmap      = will_need_new_bitmap_byte ? 1 : 0;
     uint16_t bytes_required            = bytes_used + new_bytes_for_bitmap;
 
     if (bytes_required > PAGE_SIZE) {
-        clm.AddPage();
+        clm.AddEmptyPage();
         page = clm.pages.back();
     }
 
-    uint16_t* page_u16 = reinterpret_cast<uint16_t*>(page);
+    uint16_t* page_u16 = reinterpret_cast<uint16_t*>(page.page);
     page_u16[0]++;
-    page_info.rows_in_page++;
+    page.page_info.rows_in_page++;
 
-    uint8_t* bitmap_start = page_info.BitMapBegin(page);
+    uint8_t* bitmap_start = page.page_info.BitMapBegin(page.page);
     if (will_need_new_bitmap_byte) {
-        AddByteToBitmap(&bitmap_start, &page_info);
+        AddByteToBitmap(&bitmap_start, &page.page_info);
     }
 
-    uint16_t byte_id       = page_info.rows_in_page / 8;
-    uint8_t  bit_id        = page_info.rows_in_page & bottom_three_bits_mask;
+    uint16_t byte_id       = (page.page_info.rows_in_page & ~bottom_three_bits_mask) >> 3;
+    uint8_t  bit_id        = page.page_info.rows_in_page & bottom_three_bits_mask;
     bitmap_start[byte_id] &= ~(1 << bit_id);
 
-    page_info.curr_free_slots_in_last_bitmap_byte -= 1;
+    page.page_info.curr_free_slots_in_last_bitmap_byte -= 1;
 }
 
 static void AppendAttr(void* value, SensibleColumn& clm) {
@@ -385,7 +394,8 @@ static void* GetValueClmn(size_t record_id,
     size_t page_cnt = clm.pages.size();
     size_t row_cnt  = 0;
     for (size_t i = 0; i < page_cnt; i += 1) {
-        PageDescriptor page_info = clm.page_meta[i];
+		TrackedPage& page = clm.pages[i];
+        PageDescriptor page_info = page.page_info;
         size_t         rows_in_page;
         if (clm.type == DataType::VARCHAR) {
             if (page_info.rows_in_page == is_first_big_str_page) {
@@ -401,7 +411,7 @@ static void* GetValueClmn(size_t record_id,
         size_t next_row_cnt = row_cnt + page_info.rows_in_page;
         if (record_id < next_row_cnt) {
             void* result = GetValueClmnPage(record_id - row_cnt,
-                clm.pages[i],
+                page.page,
                 page_info,
                 clm.type,
                 is_large_str,
@@ -421,7 +431,7 @@ static void* GetValueClmn(size_t record_id,
 static char* ConcatLargeString(size_t start_page_id, SensibleColumn& clm) {
     size_t total_len = PAGE_SIZE - 7;
     for (size_t i = start_page_id + 1; i < clm.pages.size(); i += 1) {
-        uint16_t* u16_p = reinterpret_cast<uint16_t*>(clm.pages[i]);
+        uint16_t* u16_p = reinterpret_cast<uint16_t*>(clm.pages[i].page);
         if (u16_p[0] == is_subsequent_big_str_page) {
             total_len += u16_p[1];
         } else {
@@ -430,12 +440,12 @@ static char* ConcatLargeString(size_t start_page_id, SensibleColumn& clm) {
     }
     char* result = reinterpret_cast<char*>(malloc(total_len + 1));
 
-    memcpy(result, &(reinterpret_cast<char*>(clm.pages[start_page_id])[4]), PAGE_SIZE - 7);
+    memcpy(result, &(reinterpret_cast<char*>(clm.pages[start_page_id].page)[4]), PAGE_SIZE - 7);
     size_t copied = PAGE_SIZE - 7;
     for (size_t i = start_page_id + 1; i < clm.pages.size(); i += 1) {
-        uint16_t* u16_p = reinterpret_cast<uint16_t*>(clm.pages[i]);
+        uint16_t* u16_p = reinterpret_cast<uint16_t*>(clm.pages[i].page);
         if (u16_p[0] == is_subsequent_big_str_page) {
-            memcpy(result, &(reinterpret_cast<char*>(clm.pages[start_page_id])[4]), u16_p[1]);
+            memcpy(result, &(reinterpret_cast<char*>(clm.pages[start_page_id].page)[4]), u16_p[1]);
             copied += u16_p[1];
         } else {
             break;

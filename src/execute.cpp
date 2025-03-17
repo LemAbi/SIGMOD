@@ -57,8 +57,8 @@ void BuildHashTbl(SensibleColumnarTable&        input_tbl,
     size_t          page_cnt            = clm_to_hash.pages.size();
     size_t          items_in_prev_pages = 0;
     for (size_t i = 0; i < page_cnt; i += 1) { // TODO: do the parallelisation here
-        Page*          cur_page     = clm_to_hash.pages[i];
-        PageDescriptor page_info    = clm_to_hash.page_meta[i];
+        Page*          cur_page     = clm_to_hash.pages[i].page;
+        PageDescriptor page_info    = clm_to_hash.pages[i].page_info;
         T*             data         = DataBegin<T>(cur_page);
         uint8_t*       bitmap_begin = page_info.BitMapBegin(cur_page);
         size_t         id           = items_in_prev_pages;
@@ -106,8 +106,8 @@ void BuildHashTblStr(SensibleColumnarTable&               input_tbl,
     size_t          page_cnt            = clm_to_hash.pages.size();
     size_t          items_in_prev_pages = 0;
     for (size_t i = 0; i < page_cnt; i += 1) { // TODO: do the parallelisation here
-        Page*          cur_page     = clm_to_hash.pages[i];
-        PageDescriptor page_info    = clm_to_hash.page_meta[i];
+        Page*          cur_page     = clm_to_hash.pages[i].page;
+        PageDescriptor page_info    = clm_to_hash.pages[i].page_info;
         char*          data         = DataStrBegin(cur_page);
         uint16_t*      u16_p        = reinterpret_cast<uint16_t*>(cur_page);
         uint8_t*       bitmap_begin = page_info.BitMapBegin(cur_page);
@@ -199,28 +199,18 @@ void CollectRecord(SensibleColumnarTable&            tbl_l,
             }
         } else {
             // TODO: this copy could be elided see comment in execute_hash_join()
-            Page* page = new Page;
-            memcpy(page,
-                tbl_to_use.columns[col_id_to_use].pages[page_id_of_large_str_or_str_len],
-                PAGE_SIZE);
-            results.columns[i].pages.push_back(page);
-            results.columns[i].page_meta.push_back(
-                tbl_to_use.columns[col_id_to_use].page_meta[page_id_of_large_str_or_str_len]);
-            results.columns[i].owns_pages.push_back(PageOwnerShip::Owning);
+            results.columns[i].AddPageCopy(
+                tbl_to_use.columns[col_id_to_use].pages[page_id_of_large_str_or_str_len].page);
 
             for (size_t j = page_id_of_large_str_or_str_len + 1;
                 j < tbl_to_use.columns[col_id_to_use].pages.size();
                 j += 1) {
-                uint16_t* u16_p =
-                    reinterpret_cast<uint16_t*>(tbl_to_use.columns[col_id_to_use].pages[j]);
+                uint16_t* u16_p = reinterpret_cast<uint16_t*>(
+                    tbl_to_use.columns[col_id_to_use].pages[j].page);
                 if (u16_p[0] == is_subsequent_big_str_page) {
                     // TODO: this copy could be elided see comment in execute_hash_join()
-                    page = new Page;
-                    memcpy(page, tbl_to_use.columns[col_id_to_use].pages[j], PAGE_SIZE);
-                    results.columns[i].pages.push_back(page);
-                    results.columns[i].page_meta.push_back(
-                        tbl_to_use.columns[col_id_to_use].page_meta[j]);
-                    results.columns[i].owns_pages.push_back(PageOwnerShip::Owning);
+                    results.columns[i].AddPageCopy(
+                        tbl_to_use.columns[col_id_to_use].pages[j].page);
                 } else {
                     break;
                 }
@@ -249,8 +239,8 @@ void Probe(SensibleColumnarTable&               tbl_l,
     size_t          page_cnt            = clm_to_check.pages.size();
     size_t          items_in_prev_pages = 0;
     for (size_t i = 0; i < page_cnt; i += 1) { // TODO: do the parallelisation here
-        Page*           cur_page     = clm_to_check.pages[i];
-        PageDescriptor& page_info    = clm_to_check.page_meta[i];
+        Page*           cur_page     = clm_to_check.pages[i].page;
+        PageDescriptor& page_info    = clm_to_check.pages[i].page_info;
         T*              data         = DataBegin<T>(cur_page);
         uint8_t*        bitmap_begin = page_info.BitMapBegin(cur_page);
         size_t          curr_id      = items_in_prev_pages;
@@ -343,8 +333,8 @@ void ProbeStr(SensibleColumnarTable&                      tbl_l,
     size_t          page_cnt     = clm_to_check.pages.size();
     size_t          items_handled_in_prev_pages = 0;
     for (size_t i = 0; i < page_cnt; i += 1) { // TODO: do the parallelisation here
-        Page*           cur_page     = clm_to_check.pages[i];
-        PageDescriptor& page_info    = clm_to_check.page_meta[i];
+        Page*           cur_page     = clm_to_check.pages[i].page;
+        PageDescriptor& page_info    = clm_to_check.pages[i].page_info;
         char*           data         = DataStrBegin(cur_page);
         uint16_t*       u16_p        = reinterpret_cast<uint16_t*>(cur_page);
         uint8_t*        bitmap_begin = page_info.BitMapBegin(cur_page);
@@ -535,11 +525,8 @@ SensibleColumnarTable execute_hash_join(const Plan&  plan,
     }
 
     // TODO: left and right intermediates go out of scope here. If we want to do non-owning
-    // pages e.g. for large strings we would need to take ownership here Input pages are not an
-    // issue. I still need to check if we can assume they are stable until all our results are
-    // checked, but even if not we should copy them at the very end of our execution of the
-    // plan, as that will be the fewest amounts of copies possible and the input tables are
-    // definitively stable during the complete plan execution.
+    // pages e.g. for large strings we would need to take ownership here.
+    // Input pages are handled in exectue() in the very end before returning.
 
     return results;
 }
@@ -559,15 +546,9 @@ SensibleColumnarTable execute_scan(const Plan&       plan,
     for (size_t i = 0; i < column_cnt; i += 1) {
         size_t select_col_id = std::get<0>(output_attrs[i]);
         result.columns.emplace_back(input.columns[select_col_id].type);
-
         size_t page_cnt = input.columns[select_col_id].pages.size();
         for (size_t j = 0; j < page_cnt; j += 1) {
-            // NOTE: just taking the ptrs here should be fine since plans.inputs should live
-            // during the whole query
-            result.columns[i].pages.push_back(input.columns[select_col_id].pages[j]);
-            result.columns[i].page_meta.push_back(
-                ParsePage(result.columns[i].pages.back(), result.columns[i].type));
-            result.columns[i].owns_pages.push_back(PageOwnerShip::InputPage);
+            result.columns[i].AddInputPage(input.columns[select_col_id].pages[j]);
         }
     }
     return result;
@@ -600,17 +581,20 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
 
         size_t pages_to_move = ret.columns[i].pages.size();
         for (size_t j = 0; j < pages_to_move; j += 1) {
-            // TODO: **** CHECK IF input table goes out of scope before we are done with our
-            // results **** if it does we also need to copy input pages
-            switch (ret.columns[i].owns_pages[j]) {
-            case PageOwnerShip::InputPage:
-                result.columns[i].pages.push_back(ret.columns[i].pages[j]);
-                ret.columns[i].owns_pages[j] = PageOwnerShip::InputPage;
-                break;
-            case PageOwnerShip::Owning:
-                result.columns[i].pages.push_back(ret.columns[i].pages[j]);
-                ret.columns[i].owns_pages[j] = PageOwnerShip::NonOwning;
-                break;
+            switch (ret.columns[i].pages[j].ownership) {
+            case PageOwnerShip::InputPage: {
+                // Sadly we can not elide this copy as we have to return a ColumnarTable not a
+                // SensibleColumnarTable and thus can not conditionally elide the free of a
+                // page. If we would just pass the pointer we would double free the page once in
+                // ~Plan() once in ~ColumnarTable()
+                Page* page = new Page;
+                memcpy(page, ret.columns[i].pages[j].page, PAGE_SIZE);
+                result.columns[i].pages.push_back(page);
+            } break;
+            case PageOwnerShip::Owning: {
+                result.columns[i].pages.push_back(ret.columns[i].pages[j].page);
+                ret.columns[i].pages[j].ownership = PageOwnerShip::NonOwning;
+            } break;
             case PageOwnerShip::NonOwning: // For now illegal
                 assert(false);
                 break;
