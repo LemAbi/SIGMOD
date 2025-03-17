@@ -1,4 +1,5 @@
 #include <attribute.h>
+#include <cassert>
 #include <plan.h>
 #include <table.h>
 
@@ -73,7 +74,7 @@ void BuildHashTbl(SensibleColumnarTable&        input_tbl,
             while (processed < page_info.non_null_in_page) {
                 // NOTE: testing at larger than byte granularity could be faster overall
                 // (e.g. 512/256bit)
-                if (bitmap_begin[cur_bitmap_id] == (uint8_t)0xff) {
+                if (bitmap_begin[cur_bitmap_id] == u8_max) {
                     // Full byte not null
                     for (size_t i = 0; i < 8; i += 1) {
                         InsertToHashmap<T>(tbl, data[processed++], id);
@@ -197,24 +198,29 @@ void CollectRecord(SensibleColumnarTable&            tbl_l,
                 AppendAttr(attr, results.columns[i]);
             }
         } else {
-            // BUG: ? - check lifetime of intermediate tbls
-            results.columns[i].pages.push_back(
-                tbl_to_use.columns[col_id_to_use].pages[page_id_of_large_str_or_str_len]);
+            // TODO: this copy could be elided see comment in execute_hash_join()
+            Page* page = new Page;
+            memcpy(page,
+                tbl_to_use.columns[col_id_to_use].pages[page_id_of_large_str_or_str_len],
+                PAGE_SIZE);
+            results.columns[i].pages.push_back(page);
             results.columns[i].page_meta.push_back(
                 tbl_to_use.columns[col_id_to_use].page_meta[page_id_of_large_str_or_str_len]);
-            results.columns[i].owns_pages.push_back(false);
+            results.columns[i].owns_pages.push_back(PageOwnerShip::Owning);
 
             for (size_t j = page_id_of_large_str_or_str_len + 1;
                 j < tbl_to_use.columns[col_id_to_use].pages.size();
                 j += 1) {
                 uint16_t* u16_p =
                     reinterpret_cast<uint16_t*>(tbl_to_use.columns[col_id_to_use].pages[j]);
-                if (u16_p[0] == 0xfffeu) {
-                    results.columns[i].pages.push_back(
-                        tbl_to_use.columns[col_id_to_use].pages[j]);
+                if (u16_p[0] == is_subsequent_big_str_page) {
+                    // TODO: this copy could be elided see comment in execute_hash_join()
+                    page = new Page;
+                    memcpy(page, tbl_to_use.columns[col_id_to_use].pages[j], PAGE_SIZE);
+                    results.columns[i].pages.push_back(page);
                     results.columns[i].page_meta.push_back(
                         tbl_to_use.columns[col_id_to_use].page_meta[j]);
-                    results.columns[i].owns_pages.push_back(false);
+                    results.columns[i].owns_pages.push_back(PageOwnerShip::Owning);
                 } else {
                     break;
                 }
@@ -528,6 +534,13 @@ SensibleColumnarTable execute_hash_join(const Plan&  plan,
         }
     }
 
+    // TODO: left and right intermediates go out of scope here. If we want to do non-owning
+    // pages e.g. for large strings we would need to take ownership here Input pages are not an
+    // issue. I still need to check if we can assume they are stable until all our results are
+    // checked, but even if not we should copy them at the very end of our execution of the
+    // plan, as that will be the fewest amounts of copies possible and the input tables are
+    // definitively stable during the complete plan execution.
+
     return results;
 }
 
@@ -554,7 +567,7 @@ SensibleColumnarTable execute_scan(const Plan&       plan,
             result.columns[i].pages.push_back(input.columns[select_col_id].pages[j]);
             result.columns[i].page_meta.push_back(
                 ParsePage(result.columns[i].pages.back(), result.columns[i].type));
-            result.columns[i].owns_pages.push_back(false);
+            result.columns[i].owns_pages.push_back(PageOwnerShip::InputPage);
         }
     }
     return result;
@@ -587,12 +600,27 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
 
         size_t pages_to_move = ret.columns[i].pages.size();
         for (size_t j = 0; j < pages_to_move; j += 1) {
-            // // BUG: ? -  check lifetimes - maybe need cpy here
-            // result.columns[i].pages.push_back(ret.columns[i].pages[j]);
-            // ret.columns[i].owns_pages[j] = false;
-            Page* page = new Page;
-            std::memcpy(page, ret.columns[i].pages[j], PAGE_SIZE);
-            result.columns[i].pages.push_back(page);
+            // TODO: **** CHECK IF input table goes out of scope before we are done with our
+            // results **** if it does we also need to copy input pages
+            switch (ret.columns[i].owns_pages[j]) {
+            case PageOwnerShip::InputPage:
+                result.columns[i].pages.push_back(ret.columns[i].pages[j]);
+                ret.columns[i].owns_pages[j] = PageOwnerShip::InputPage;
+                break;
+            case PageOwnerShip::Owning:
+                result.columns[i].pages.push_back(ret.columns[i].pages[j]);
+                ret.columns[i].owns_pages[j] = PageOwnerShip::NonOwning;
+                break;
+            case PageOwnerShip::NonOwning: // For now illegal
+                assert(false);
+                break;
+                // case PageOwnerShip::NonOwning:
+                //     Page* page = new Page;
+                //     std::memcpy(page, ret.columns[i].pages[j], PAGE_SIZE);
+                //     result.columns[i].pages.push_back(page);
+                //     ret.columns[i].owns_pages[j] = PageOwnerShip::Owning;
+                //     break;
+            }
         }
     }
     return result;

@@ -74,12 +74,18 @@ static PageDescriptor ParsePage(Page* page, DataType data_type) {
     return result;
 }
 
+enum class PageOwnerShip {
+	InputPage,
+	Owning,
+	NonOwning,
+};
+
 struct SensibleColumn {
     DataType           type;
     std::vector<Page*> pages;
     // Used when filling in new pages to avoid re-calculating a bunch of shit
     std::vector<PageDescriptor> page_meta;
-    std::vector<bool>           owns_pages;
+    std::vector<PageOwnerShip>           owns_pages;
 
     void AddPage() {
         Page*     page                                  = new Page;
@@ -90,7 +96,7 @@ struct SensibleColumn {
         pages.push_back(page);
         uint16_t begin_offset = type == DataType::VARCHAR ? 4 : AlingDTOffset(type);
         page_meta.push_back({0, 0, 1, 8, begin_offset});
-        owns_pages.push_back(true);
+        owns_pages.push_back(PageOwnerShip::Owning);
     }
 
     SensibleColumn(DataType data_type)
@@ -101,7 +107,7 @@ struct SensibleColumn {
 
     ~SensibleColumn() {
         for (size_t i = 0; i < pages.size(); i += 1) {
-            if (owns_pages[i]) {
+            if (owns_pages[i] == PageOwnerShip::Owning) {
                 delete pages[i];
             }
         }
