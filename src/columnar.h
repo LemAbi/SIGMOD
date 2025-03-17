@@ -152,40 +152,40 @@ void AppendValue(T* value, SensibleColumn& clm) {
     if (clm.pages.size() == 0) {
         clm.AddEmptyPage();
     }
-    TrackedPage& page = clm.pages.back();
+    TrackedPage* page = &clm.pages.back();
 
     uint16_t bytes_used =
-        page.page_info.curr_next_data_begin_offset + page.page_info.bitmap_size;
-    bool will_need_new_bitmap_byte = page.page_info.curr_free_slots_in_last_bitmap_byte == 0;
+        page->page_info.curr_next_data_begin_offset + page->page_info.bitmap_size;
+    bool will_need_new_bitmap_byte = page->page_info.curr_free_slots_in_last_bitmap_byte == 0;
     uint16_t new_bytes_for_bitmap  = will_need_new_bitmap_byte ? 1 : 0;
     uint16_t bytes_required        = bytes_used + sizeof(T) + new_bytes_for_bitmap;
 
     if (bytes_required > PAGE_SIZE) {
         clm.AddEmptyPage();
-        page                      = clm.pages.back();
+        page                      = &clm.pages.back();
         will_need_new_bitmap_byte = false;
     }
 
     void* current_start =
-        &(reinterpret_cast<uint8_t*>(page.page)[page.page_info.curr_next_data_begin_offset]);
+        &(reinterpret_cast<uint8_t*>(page->page)[page->page_info.curr_next_data_begin_offset]);
     reinterpret_cast<T*>(current_start)[0] = *value;
-    uint16_t* page_u16                     = reinterpret_cast<uint16_t*>(page.page);
+    uint16_t* page_u16                     = reinterpret_cast<uint16_t*>(page->page);
     page_u16[0]++;
     page_u16[1]++;
 
-    uint8_t* bitmap_start = page.page_info.BitMapBegin(page.page);
+    uint8_t* bitmap_start = page->page_info.BitMapBegin(page->page);
     if (will_need_new_bitmap_byte) {
-        AddByteToBitmap(&bitmap_start, &page.page_info);
+        AddByteToBitmap(&bitmap_start, &page->page_info);
     }
 
-    uint16_t byte_id       = (page.page_info.rows_in_page & (~bottom_three_bits_mask)) >> 3;
-    uint8_t  bit_id        = page.page_info.rows_in_page & bottom_three_bits_mask;
+    uint16_t byte_id       = (page->page_info.rows_in_page & (~bottom_three_bits_mask)) >> 3;
+    uint8_t  bit_id        = page->page_info.rows_in_page & bottom_three_bits_mask;
     bitmap_start[byte_id] |= (1 << bit_id);
 
-    page.page_info.curr_next_data_begin_offset += sizeof(T);
-    page.page_info.non_null_in_page++;
-    page.page_info.rows_in_page++;
-    page.page_info.curr_free_slots_in_last_bitmap_byte -= 1;
+    page->page_info.curr_next_data_begin_offset += sizeof(T);
+    page->page_info.non_null_in_page++;
+    page->page_info.rows_in_page++;
+    page->page_info.curr_free_slots_in_last_bitmap_byte -= 1;
 }
 
 template <>
@@ -194,15 +194,15 @@ template <>
 void AppendValue<char*>(char** value, SensibleColumn& clm) = delete;
 
 static void AppendLargStr(char* value, size_t space_for_value, SensibleColumn& clm) {
-    TrackedPage& page = clm.pages.back();
+    TrackedPage* page = &clm.pages.back();
 
-    if (page.page_info.rows_in_page != 0) {
+    if (page->page_info.rows_in_page != 0) {
         clm.AddEmptyPage();
-        page = clm.pages.back();
+        page = &clm.pages.back();
     }
-    uint16_t* page_u16          = reinterpret_cast<uint16_t*>(page.page);
-    uint8_t*  page_u8           = reinterpret_cast<uint8_t*>(page.page);
-    page.page_info.rows_in_page = is_first_big_str_page;
+    uint16_t* page_u16          = reinterpret_cast<uint16_t*>(page->page);
+    uint8_t*  page_u8           = reinterpret_cast<uint8_t*>(page->page);
+    page->page_info.rows_in_page = is_first_big_str_page;
     page_u16[0]                 = is_first_big_str_page;
 
     size_t consumed_bytes = 0;
@@ -217,10 +217,10 @@ static void AppendLargStr(char* value, size_t space_for_value, SensibleColumn& c
         consumed_bytes += bytes_for_this_page;
         if (consumed_bytes < space_for_value) {
             clm.AddEmptyPage();
-            page                        = clm.pages.back();
-            page_u16                    = reinterpret_cast<uint16_t*>(page.page);
-            page_u8                     = reinterpret_cast<uint8_t*>(page.page);
-            page.page_info.rows_in_page = is_subsequent_big_str_page;
+            page                        = &clm.pages.back();
+            page_u16                    = reinterpret_cast<uint16_t*>(page->page);
+            page_u8                     = reinterpret_cast<uint8_t*>(page->page);
+            page->page_info.rows_in_page = is_subsequent_big_str_page;
             page_u16[0]                 = is_subsequent_big_str_page;
         } else {
             break;
@@ -238,31 +238,31 @@ static void AppendStr(void* value, size_t str_len, SensibleColumn& clm) {
         return;
     }
 
-    TrackedPage& page = clm.pages.back();
+    TrackedPage* page = &clm.pages.back();
     uint16_t     bytes_used =
-        page.page_info.curr_next_data_begin_offset + page.page_info.bitmap_size;
-    bool will_need_new_bitmap_byte = page.page_info.curr_free_slots_in_last_bitmap_byte == 0;
+        page->page_info.curr_next_data_begin_offset + page->page_info.bitmap_size;
+    bool will_need_new_bitmap_byte = page->page_info.curr_free_slots_in_last_bitmap_byte == 0;
     uint16_t new_bytes_for_bitmap  = will_need_new_bitmap_byte ? 1 : 0;
     uint16_t bytes_required =
         bytes_used + str_len + new_bytes_for_bitmap + 2; // 2 for offset array slot
 
     if (bytes_required > PAGE_SIZE) {
         clm.AddEmptyPage();
-        page                      = clm.pages.back();
+        page                      = &clm.pages.back();
         will_need_new_bitmap_byte = false;
     }
 
-    uint16_t* page_u16  = reinterpret_cast<uint16_t*>(page.page);
-    char*     page_char = reinterpret_cast<char*>(page.page);
+    uint16_t* page_u16  = reinterpret_cast<uint16_t*>(page->page);
+    char*     page_char = reinterpret_cast<char*>(page->page);
 
-    uint16_t prev_offset = page.page_info.non_null_in_page == 0
+    uint16_t prev_offset = page->page_info.non_null_in_page == 0
                              ? 0
-                             : page_u16[2 + (page.page_info.non_null_in_page - 1)];
+                             : page_u16[2 + (page->page_info.non_null_in_page - 1)];
     // TODO: this sucks...
     // shift existing strs out of the way for new offset array entry
     // aliasing -> no memcpy
-    uint16_t old_start = (page.page_info.rows_in_page + 2) * 2;
-    uint16_t old_end   = page.page_info.curr_next_data_begin_offset;
+    uint16_t old_start = (page->page_info.rows_in_page + 2) * 2;
+    uint16_t old_end   = page->page_info.curr_next_data_begin_offset;
     uint16_t to_move   = old_end - old_start;
     uint16_t moved     = 0;
     char*    src       = &(page_char[old_end - 1]);
@@ -271,59 +271,59 @@ static void AppendStr(void* value, size_t str_len, SensibleColumn& clm) {
         src--;
         moved++;
     }
-    page.page_info.curr_next_data_begin_offset += 2;
+    page->page_info.curr_next_data_begin_offset += 2;
 
-    page_u16[2 + page.page_info.non_null_in_page] = str_len + prev_offset;
-    memcpy(&(page_char[page.page_info.curr_next_data_begin_offset]), value, str_len);
+    page_u16[2 + page->page_info.non_null_in_page] = str_len + prev_offset;
+    memcpy(&(page_char[page->page_info.curr_next_data_begin_offset]), value, str_len);
 
     page_u16[0]++;
     page_u16[1]++;
 
-    uint8_t* bitmap_start = page.page_info.BitMapBegin(page.page);
+    uint8_t* bitmap_start = page->page_info.BitMapBegin(page->page);
     if (will_need_new_bitmap_byte) {
-        AddByteToBitmap(&bitmap_start, &page.page_info);
+        AddByteToBitmap(&bitmap_start, &page->page_info);
     }
 
-    uint16_t byte_id       = (page.page_info.rows_in_page & (~bottom_three_bits_mask)) >> 3;
-    uint8_t  bit_id        = page.page_info.rows_in_page & bottom_three_bits_mask;
+    uint16_t byte_id       = (page->page_info.rows_in_page & (~bottom_three_bits_mask)) >> 3;
+    uint8_t  bit_id        = page->page_info.rows_in_page & bottom_three_bits_mask;
     bitmap_start[byte_id] |= (1 << bit_id);
 
-    page.page_info.non_null_in_page++;
-    page.page_info.rows_in_page++;
-    page.page_info.curr_next_data_begin_offset         += str_len;
-    page.page_info.curr_free_slots_in_last_bitmap_byte -= 1;
+    page->page_info.non_null_in_page++;
+    page->page_info.rows_in_page++;
+    page->page_info.curr_next_data_begin_offset         += str_len;
+    page->page_info.curr_free_slots_in_last_bitmap_byte -= 1;
 }
 
 static void AppendNull(SensibleColumn& clm) {
     if (clm.pages.size() == 0) {
         clm.AddEmptyPage();
     }
-    TrackedPage& page = clm.pages.back();
+    TrackedPage* page = &clm.pages.back();
 
-    uint16_t bytes_used = page.page_info.curr_next_data_begin_offset + page.page_info.bitmap_size;
-    bool     will_need_new_bitmap_byte = page.page_info.curr_free_slots_in_last_bitmap_byte == 0;
+    uint16_t bytes_used = page->page_info.curr_next_data_begin_offset + page->page_info.bitmap_size;
+    bool     will_need_new_bitmap_byte = page->page_info.curr_free_slots_in_last_bitmap_byte == 0;
     uint16_t new_bytes_for_bitmap      = will_need_new_bitmap_byte ? 1 : 0;
     uint16_t bytes_required            = bytes_used + new_bytes_for_bitmap;
 
     if (bytes_required > PAGE_SIZE) {
         clm.AddEmptyPage();
-        page = clm.pages.back();
+        page = &clm.pages.back();
     }
 
-    uint16_t* page_u16 = reinterpret_cast<uint16_t*>(page.page);
+    uint16_t* page_u16 = reinterpret_cast<uint16_t*>(page->page);
     page_u16[0]++;
-    page.page_info.rows_in_page++;
+    page->page_info.rows_in_page++;
 
-    uint8_t* bitmap_start = page.page_info.BitMapBegin(page.page);
+    uint8_t* bitmap_start = page->page_info.BitMapBegin(page->page);
     if (will_need_new_bitmap_byte) {
-        AddByteToBitmap(&bitmap_start, &page.page_info);
+        AddByteToBitmap(&bitmap_start, &page->page_info);
     }
 
-    uint16_t byte_id       = (page.page_info.rows_in_page & ~bottom_three_bits_mask) >> 3;
-    uint8_t  bit_id        = page.page_info.rows_in_page & bottom_three_bits_mask;
+    uint16_t byte_id       = (page->page_info.rows_in_page & ~bottom_three_bits_mask) >> 3;
+    uint8_t  bit_id        = page->page_info.rows_in_page & bottom_three_bits_mask;
     bitmap_start[byte_id] &= ~(1 << bit_id);
 
-    page.page_info.curr_free_slots_in_last_bitmap_byte -= 1;
+    page->page_info.curr_free_slots_in_last_bitmap_byte -= 1;
 }
 
 static void AppendAttr(void* value, SensibleColumn& clm) {
