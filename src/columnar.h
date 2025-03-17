@@ -10,7 +10,7 @@
 
 static uint16_t bottom_three_bits_mask = 0b111u;
 
-static uint16_t is_first_big_str_page = 0xffffu;
+static uint16_t is_first_big_str_page      = 0xffffu;
 static uint16_t is_subsequent_big_str_page = 0xfffeu;
 
 template <typename T>
@@ -57,11 +57,12 @@ struct PageDescriptor {
 
 static PageDescriptor ParsePage(Page* page, DataType data_type) {
     PageDescriptor result;
-    uint16_t*      page_u16                    = reinterpret_cast<uint16_t*>(page);
-    result.rows_in_page                        = page_u16[0];
-    result.non_null_in_page                    = page_u16[1];
-    result.bitmap_size                         = (result.rows_in_page + 7) / 8;
-    result.curr_free_slots_in_last_bitmap_byte = (result.rows_in_page + 7) % 8;
+    uint16_t*      page_u16 = reinterpret_cast<uint16_t*>(page);
+    result.rows_in_page     = page_u16[0];
+    result.non_null_in_page = page_u16[1];
+    result.bitmap_size      = ((result.rows_in_page + 7) & ~bottom_three_bits_mask) >> 3;
+    result.curr_free_slots_in_last_bitmap_byte =
+        (result.rows_in_page + 7) & bottom_three_bits_mask;
     if (data_type != DataType::VARCHAR) {
         result.curr_next_data_begin_offset =
             AlingDTOffset(data_type) + (result.non_null_in_page * SizeDT(data_type));
@@ -110,6 +111,20 @@ struct SensibleColumnarTable {
     std::vector<SensibleColumn> columns;
 };
 
+static void AddByteToBitmap(uint8_t** bitmap, PageDescriptor* page_info) {
+    uint8_t* old_bitmap_start = *bitmap;
+    // We need to move the old bitmap one byte to the right
+    uint8_t* new_bitmap_start = &old_bitmap_start[-1];
+    // aliasing -> no memcpy
+    for (size_t i = 0; i < page_info->bitmap_size; i += 1) {
+        new_bitmap_start[i] = old_bitmap_start[i];
+    }
+    new_bitmap_start[page_info->bitmap_size] = 0; // clear new last byte
+    page_info->bitmap_size++;
+    page_info->curr_free_slots_in_last_bitmap_byte = 8;
+    *bitmap                                        = new_bitmap_start;
+}
+
 template <typename T>
 void AppendValue(T* value, SensibleColumn& clm) {
     if (clm.pages.size() == 0) {
@@ -139,17 +154,9 @@ void AppendValue(T* value, SensibleColumn& clm) {
 
     uint8_t* bitmap_start = page_info.BitMapBegin(page);
     if (will_need_new_bitmap_byte) {
-        // We need to move the old bitmap one byte to the right
-        uint8_t* new_bitmap_start = &bitmap_start[-1];
-        // aliasing -> no memcpy
-        for (size_t i = 0; i < page_info.bitmap_size; i += 1) {
-            new_bitmap_start[i] = bitmap_start[i];
-        }
-        new_bitmap_start[page_info.bitmap_size] = 0; // clear new last byte
-        page_info.bitmap_size++;
-        page_info.curr_free_slots_in_last_bitmap_byte = 8;
-        bitmap_start                                  = new_bitmap_start;
+        AddByteToBitmap(&bitmap_start, &page_info);
     }
+
     uint16_t byte_id       = (page_info.rows_in_page & (~bottom_three_bits_mask)) >> 3;
     uint8_t  bit_id        = page_info.rows_in_page & bottom_three_bits_mask;
     bitmap_start[byte_id] |= (1 << bit_id);
@@ -256,17 +263,9 @@ static void AppendStr(void* value, size_t str_len, SensibleColumn& clm) {
 
     uint8_t* bitmap_start = page_info.BitMapBegin(page);
     if (will_need_new_bitmap_byte) {
-        // We need to move the old bitmap one byte to the right
-        uint8_t* new_bitmap_start = &bitmap_start[-1];
-        // aliasing -> no memcpy
-        for (size_t i = 0; i < page_info.bitmap_size; i += 1) {
-            new_bitmap_start[i] = bitmap_start[i];
-        }
-        new_bitmap_start[page_info.bitmap_size] = 0; // clear new last byte
-        page_info.bitmap_size++;
-        page_info.curr_free_slots_in_last_bitmap_byte = 8;
-        bitmap_start                                  = new_bitmap_start;
+        AddByteToBitmap(&bitmap_start, &page_info);
     }
+
     uint16_t byte_id       = (page_info.rows_in_page & (~bottom_three_bits_mask)) >> 3;
     uint8_t  bit_id        = page_info.rows_in_page & bottom_three_bits_mask;
     bitmap_start[byte_id] |= (1 << bit_id);
@@ -300,32 +299,22 @@ static void AppendNull(SensibleColumn& clm) {
 
     uint8_t* bitmap_start = page_info.BitMapBegin(page);
     if (will_need_new_bitmap_byte) {
-        // We need to move the old bitmap one byte to the right
-        uint8_t* new_bitmap_start = &bitmap_start[-1];
-        // aliasing -> no memcpy
-        for (size_t i = 0; i < page_info.bitmap_size; i += 1) {
-            new_bitmap_start[i] = bitmap_start[i];
-        }
-        new_bitmap_start[page_info.bitmap_size] = 0;
-        page_info.bitmap_size++;
-        page_info.curr_free_slots_in_last_bitmap_byte = 8;
+        AddByteToBitmap(&bitmap_start, &page_info);
     }
+
     uint16_t byte_id       = page_info.rows_in_page / 8;
     uint8_t  bit_id        = page_info.rows_in_page & bottom_three_bits_mask;
     bitmap_start[byte_id] &= ~(1 << bit_id);
+
     page_info.curr_free_slots_in_last_bitmap_byte -= 1;
 }
 
 static void AppendAttr(void* value, SensibleColumn& clm) {
     if (value != nullptr) {
         switch (clm.type) {
-        case DataType::INT32:
-            AppendValue<int32_t>(reinterpret_cast<int32_t*>(value), clm);
-            break;
-        case DataType::INT64:
-            AppendValue<int64_t>(reinterpret_cast<int64_t*>(value), clm);
-            break;
-        case DataType::FP64:    AppendValue<double>(reinterpret_cast<double*>(value), clm); break;
+        case DataType::INT32:   AppendValue<int32_t>(static_cast<int32_t*>(value), clm); break;
+        case DataType::INT64:   AppendValue<int64_t>(static_cast<int64_t*>(value), clm); break;
+        case DataType::FP64:    AppendValue<double>(static_cast<double*>(value), clm); break;
         case DataType::VARCHAR: assert(false); break;
         }
     } else {
