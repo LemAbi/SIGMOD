@@ -1,3 +1,5 @@
+#pragma once
+
 #include "../build/_deps/tracy-src/public/tracy/Tracy.hpp"
 
 #include <atomic>

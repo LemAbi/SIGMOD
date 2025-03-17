@@ -7,7 +7,6 @@
 #include "columnar.h"
 #include "thread_pool.h"
 
-#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -18,6 +17,8 @@
 #include <vector>
 
 namespace Contest {
+static constexpr uint8_t u8_max = 0xffu;
+
 SensibleColumnarTable execute_impl(const Plan& plan, size_t node_idx);
 
 template <typename T>
@@ -28,6 +29,22 @@ InsertToHashmap(std::unordered_map<T, std::vector<size_t>>& tbl, T& key, size_t 
     } else {
         itr->second.push_back(id);
     }
+}
+
+inline void InsertStrToHashmap(std::unordered_map<std::string, std::vector<size_t>>& tbl,
+    char*                                                                            str,
+    uint16_t current_str_len,
+    size_t   id) {
+    // This is a quick workaround to make the non null terminated string in
+    // the pages work with the hashmap, by using std::string which we
+    // construct from a null terminated char* that we create here
+    // temporarily
+    char* tmp_str = (char*)malloc(current_str_len + 1);
+    memcpy(tmp_str, str, current_str_len);
+    tmp_str[current_str_len] = 0;
+    std::string key(tmp_str);
+    free(tmp_str);
+    InsertToHashmap<std::string>(tbl, key, id);
 }
 
 template <typename T>
@@ -80,7 +97,7 @@ void BuildHashTbl(SensibleColumnarTable&        input_tbl,
     }
 }
 
-void BuildHashTblStr(SensibleColumnarTable&                  input_tbl,
+void BuildHashTblStr(SensibleColumnarTable&               input_tbl,
     size_t                                                col_id,
     std::unordered_map<std::string, std::vector<size_t>>& tbl) {
     ZoneScoped;
@@ -103,19 +120,7 @@ void BuildHashTblStr(SensibleColumnarTable&                  input_tbl,
             for (size_t j = 0; j < page_info.rows_in_page; j += 1) {
                 char*    str             = &data[current_str_begin_offset];
                 uint16_t current_str_len = u16_p[processed];
-
-                // This is a quick workaround to make the non null terminated string in
-                // the pages work with the hashmap, by using std::string which we
-                // construct from a null terminated char* that we create here
-                // temporarily
-                char* tmp_str = (char*)malloc(current_str_len + 1);
-                memcpy(tmp_str, str, current_str_len);
-                tmp_str[current_str_len] = 0;
-                std::string key(tmp_str);
-                free(tmp_str);
-
-                InsertToHashmap<std::string>(tbl, key, id);
-
+                InsertStrToHashmap(tbl, str, current_str_len, id);
                 current_str_begin_offset += current_str_len;
                 processed++;
                 id++;
@@ -124,24 +129,12 @@ void BuildHashTblStr(SensibleColumnarTable&                  input_tbl,
             while (processed < page_info.non_null_in_page) {
                 // NOTE: testing at larger than byte granularity could be faster overall
                 // (e.g. 512/256bit)
-                if (bitmap_begin[cur_bitmap_id] == (uint8_t)0xffu) {
+                if (bitmap_begin[cur_bitmap_id] == u8_max) {
                     // Full byte not null
                     for (size_t i = 0; i < 8; i += 1) {
                         char*    str             = &data[current_str_begin_offset];
                         uint16_t current_str_len = u16_p[processed];
-
-                        // This is a quick workaround to make the non null terminated string in
-                        // the pages work with the hashmap, by using std::string which we
-                        // construct from a null terminated char* that we create here
-                        // temporarily
-                        char* tmp_str = (char*)malloc(current_str_len + 1);
-                        memcpy(tmp_str, str, current_str_len);
-                        tmp_str[current_str_len] = 0;
-                        std::string key(tmp_str);
-                        free(tmp_str);
-
-                        InsertToHashmap<std::string>(tbl, key, id);
-
+                        InsertStrToHashmap(tbl, str, current_str_len, id);
                         current_str_begin_offset += current_str_len;
                         processed++;
                         id++;
@@ -154,19 +147,7 @@ void BuildHashTblStr(SensibleColumnarTable&                  input_tbl,
                         if ((current_byte & (1 << intra_bitmap_id)) != 0) {
                             char*    str             = &data[current_str_begin_offset];
                             uint16_t current_str_len = u16_p[processed];
-
-                            // This is a quick workaround to make the non null terminated string
-                            // in the pages work with the hashmap, by using std::string which we
-                            // construct from a null terminated char* that we create here
-                            // temporarily
-                            char* tmp_str = (char*)malloc(current_str_len + 1);
-                            memcpy(tmp_str, str, current_str_len);
-                            tmp_str[current_str_len] = 0;
-                            std::string key(tmp_str);
-                            free(tmp_str);
-
-                            InsertToHashmap<std::string>(tbl, key, id);
-
+                            InsertStrToHashmap(tbl, str, current_str_len, id);
                             current_str_begin_offset += current_str_len;
                             processed++;
                         }
@@ -180,7 +161,8 @@ void BuildHashTblStr(SensibleColumnarTable&                  input_tbl,
     }
 }
 
-// TODO: this is not particularly efficient
+// TODO: this is not particularly efficient. We could instead collect all ids and then collect
+// the attr later column-wise
 void CollectRecord(SensibleColumnarTable&            tbl_l,
     SensibleColumnarTable&                           tbl_r,
     SensibleColumnarTable&                           results,
@@ -288,7 +270,7 @@ void Probe(SensibleColumnarTable&               tbl_l,
             }
         } else {
             while (curr_non_null_id < page_info.non_null_in_page) {
-                if (bitmap_begin[cur_bitmap_id] == 0xffu) { // Full byte not null
+                if (bitmap_begin[cur_bitmap_id] == u8_max) { // Full byte not null
                     for (size_t j = 0; j < 8; j += 1) {
                         T& key = data[curr_non_null_id++];
                         if (auto itr = tbl.find(key); itr != tbl.end()) {
@@ -338,7 +320,7 @@ void Probe(SensibleColumnarTable&               tbl_l,
     }
 }
 
-void ProbeStr(SensibleColumnarTable&                         tbl_l,
+void ProbeStr(SensibleColumnarTable&                      tbl_l,
     SensibleColumnarTable&                                tbl_r,
     size_t                                                col_id_of_non_hashed_in,
     std::unordered_map<std::string, std::vector<size_t>>& tbl,
@@ -371,10 +353,7 @@ void ProbeStr(SensibleColumnarTable&                         tbl_l,
                 char*    str             = &data[current_str_begin_offset];
                 uint16_t current_str_len = u16_p[curr_id + 2];
 
-                // This is a quick workaround to make the non null terminated string in
-                // the pages work with the hashmap, by using std::string which we
-                // construct from a null terminated char* that we create here
-                // temporarily
+                // Same workaround as in build
                 char* tmp_str = (char*)malloc(current_str_len + 1);
                 memcpy(tmp_str, str, current_str_len);
                 tmp_str[current_str_len] = 0;
@@ -400,16 +379,13 @@ void ProbeStr(SensibleColumnarTable&                         tbl_l,
             }
         } else {
             while (curr_non_null_id < page_info.non_null_in_page) {
-                if (bitmap_begin[cur_bitmap_id] == 0xffu) {
+                if (bitmap_begin[cur_bitmap_id] == u8_max) {
                     // Full byte not null
                     for (size_t j = 0; j < 8; j += 1) {
                         char*    str             = &data[current_str_begin_offset];
                         uint16_t current_str_len = u16_p[curr_id + 2];
 
-                        // This is a quick workaround to make the non null terminated string in
-                        // the pages work with the hashmap, by using std::string which we
-                        // construct from a null terminated char* that we create here
-                        // temporarily
+                        // Same workaround as in build
                         char* tmp_str = (char*)malloc(current_str_len + 1);
                         memcpy(tmp_str, str, current_str_len);
                         tmp_str[current_str_len] = 0;
@@ -442,10 +418,7 @@ void ProbeStr(SensibleColumnarTable&                         tbl_l,
                             char*    str             = &data[current_str_begin_offset];
                             uint16_t current_str_len = u16_p[curr_id + 2];
 
-                            // This is a quick workaround to make the non null terminated string
-                            // in the pages work with the hashmap, by using std::string which we
-                            // construct from a null terminated char* that we create here
-                            // temporarily
+                            // Same workaround as in build
                             char* tmp_str = (char*)malloc(current_str_len + 1);
                             memcpy(tmp_str, str, current_str_len);
                             tmp_str[current_str_len] = 0;

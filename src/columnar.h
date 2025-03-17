@@ -6,12 +6,14 @@
 #include "data_type_util.h"
 
 #include <cstdint>
+#include <cstring>
 #include <iostream>
+#include <vector>
 
-static uint16_t bottom_three_bits_mask = 0b111u;
+static constexpr uint16_t bottom_three_bits_mask = 0b111u;
 
-static uint16_t is_first_big_str_page      = 0xffffu;
-static uint16_t is_subsequent_big_str_page = 0xfffeu;
+static constexpr uint16_t is_first_big_str_page      = 0xffffu;
+static constexpr uint16_t is_subsequent_big_str_page = 0xfffeu;
 
 template <typename T>
 inline T* DataBegin(Page* page) {
@@ -345,8 +347,8 @@ static void* GetValueClmnPage(size_t page_record_id,
         while (current_checked < page_record_id) {
             // NOTE: popcnt would be nice here but c++ sucks :) (i.e. it is C++ >= 20)
             // TODO: could still do blocked testing here
-            uint16_t byte_id = current_checked / 8;
-            uint8_t  bit_id  = current_checked % 8;
+            uint16_t byte_id = (current_checked & ~bottom_three_bits_mask) >> 3;
+            uint8_t  bit_id  = current_checked & bottom_three_bits_mask;
             if ((bitmap[byte_id] & (1 << bit_id)) != 0) {
                 current_non_null++;
             }
