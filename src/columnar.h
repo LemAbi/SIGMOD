@@ -8,7 +8,10 @@
 #include <cstdint>
 #include <iostream>
 
-static uint16_t bottom_three_bits_mask = 0b111;
+static uint16_t bottom_three_bits_mask = 0b111u;
+
+static uint16_t is_first_big_str_page = 0xffffu;
+static uint16_t is_subsequent_big_str_page = 0xfffeu;
 
 template <typename T>
 inline T* DataBegin(Page* page) {
@@ -173,8 +176,8 @@ static void AppendLargStr(char* value, size_t space_for_value, SensibleColumn& c
     }
     uint16_t* page_u16     = reinterpret_cast<uint16_t*>(page);
     uint8_t*  page_u8      = reinterpret_cast<uint8_t*>(page);
-    page_info.rows_in_page = 0xffffu;
-    page_u16[0]            = 0xffffu;
+    page_info.rows_in_page = is_first_big_str_page;
+    page_u16[0]            = is_first_big_str_page;
 
     size_t consumed_bytes = 0;
     while (true) {
@@ -192,8 +195,8 @@ static void AppendLargStr(char* value, size_t space_for_value, SensibleColumn& c
             page_info              = clm.page_meta.back();
             page_u16               = reinterpret_cast<uint16_t*>(page);
             page_u8                = reinterpret_cast<uint8_t*>(page);
-            page_info.rows_in_page = 0xfffeu;
-            page_u16[0]            = 0xfffeu;
+            page_info.rows_in_page = is_subsequent_big_str_page;
+            page_u16[0]            = is_subsequent_big_str_page;
         } else {
             break;
         }
@@ -337,7 +340,7 @@ static void* GetValueClmnPage(size_t page_record_id,
     DataType                         data_type,
     bool*                            is_large_str,
     size_t*                          str_len) {
-    if (data_type == DataType::VARCHAR && page_info.rows_in_page == 0xffffu) {
+    if (data_type == DataType::VARCHAR && page_info.rows_in_page == is_first_big_str_page) {
         *is_large_str = true;
         return page;
     }
@@ -388,9 +391,9 @@ static void* GetValueClmn(size_t record_id,
         PageDescriptor page_info = clm.page_meta[i];
         size_t         rows_in_page;
         if (clm.type == DataType::VARCHAR) {
-            if (page_info.rows_in_page == 0xffffu) {
+            if (page_info.rows_in_page == is_first_big_str_page) {
                 rows_in_page = 1;
-            } else if (page_info.rows_in_page == 0xfffeu) {
+            } else if (page_info.rows_in_page == is_subsequent_big_str_page) {
                 rows_in_page = 0;
             } else {
                 rows_in_page = page_info.rows_in_page;
@@ -422,7 +425,7 @@ static char* ConcatLargeString(size_t start_page_id, SensibleColumn& clm) {
     size_t total_len = PAGE_SIZE - 7;
     for (size_t i = start_page_id + 1; i < clm.pages.size(); i += 1) {
         uint16_t* u16_p = reinterpret_cast<uint16_t*>(clm.pages[i]);
-        if (u16_p[0] == 0xfffeu) {
+        if (u16_p[0] == is_subsequent_big_str_page) {
             total_len += u16_p[1];
         } else {
             break;
@@ -434,7 +437,7 @@ static char* ConcatLargeString(size_t start_page_id, SensibleColumn& clm) {
     size_t copied = PAGE_SIZE - 7;
     for (size_t i = start_page_id + 1; i < clm.pages.size(); i += 1) {
         uint16_t* u16_p = reinterpret_cast<uint16_t*>(clm.pages[i]);
-        if (u16_p[0] == 0xfffeu) {
+        if (u16_p[0] == is_subsequent_big_str_page) {
             memcpy(result, &(reinterpret_cast<char*>(clm.pages[start_page_id])[4]), u16_p[1]);
             copied += u16_p[1];
         } else {
