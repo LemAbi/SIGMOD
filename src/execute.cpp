@@ -4,8 +4,8 @@
 
 // TODO: Remove tray before submission
 #include "../build/_deps/tracy-src/public/tracy/Tracy.hpp"
-#include "thread_pool.h"
 #include "columnar.h"
+#include "thread_pool.h"
 
 #include <cassert>
 #include <cstddef>
@@ -80,8 +80,7 @@ void BuildHashTbl(SensibleColumnarTable&        input_tbl,
     }
 }
 
-template <char*>
-void BuildHashTbl(SensibleColumnarTable&                  input_tbl,
+void BuildHashTblStr(SensibleColumnarTable&                  input_tbl,
     size_t                                                col_id,
     std::unordered_map<std::string, std::vector<size_t>>& tbl) {
     ZoneScoped;
@@ -91,7 +90,7 @@ void BuildHashTbl(SensibleColumnarTable&                  input_tbl,
     for (size_t i = 0; i < page_cnt; i += 1) { // TODO: do the parallelisation here
         Page*          cur_page     = clm_to_hash.pages[i];
         PageDescriptor page_info    = clm_to_hash.page_meta[i];
-        char*          data         = DataBegin<char>(cur_page);
+        char*          data         = DataStrBegin(cur_page);
         uint16_t*      u16_p        = reinterpret_cast<uint16_t*>(cur_page);
         uint8_t*       bitmap_begin = page_info.BitMapBegin(cur_page);
         size_t         id           = items_in_prev_pages;
@@ -339,8 +338,7 @@ void Probe(SensibleColumnarTable&               tbl_l,
     }
 }
 
-template <char*>
-void Probe(SensibleColumnarTable&                         tbl_l,
+void ProbeStr(SensibleColumnarTable&                         tbl_l,
     SensibleColumnarTable&                                tbl_r,
     size_t                                                col_id_of_non_hashed_in,
     std::unordered_map<std::string, std::vector<size_t>>& tbl,
@@ -359,7 +357,7 @@ void Probe(SensibleColumnarTable&                         tbl_l,
     for (size_t i = 0; i < page_cnt; i += 1) { // TODO: do the parallelisation here
         Page*           cur_page     = clm_to_check.pages[i];
         PageDescriptor& page_info    = clm_to_check.page_meta[i];
-        char*           data         = DataBegin<char>(cur_page);
+        char*           data         = DataStrBegin(cur_page);
         uint16_t*       u16_p        = reinterpret_cast<uint16_t*>(cur_page);
         uint8_t*        bitmap_begin = page_info.BitMapBegin(cur_page);
         size_t          curr_id      = items_handled_in_prev_pages;
@@ -494,13 +492,24 @@ struct JoinAlgorithm {
     template <class T>
     auto run() {
         ZoneScoped;
-        std::unordered_map<T, std::vector<size_t>> hash_table;
-        if (build_left) {
-            BuildHashTbl(left, left_col, hash_table);
-            Probe(left, right, right_col, hash_table, results, output_attrs, true);
+        if constexpr (std::is_same<T, char*>()) {
+            std::unordered_map<std::string, std::vector<size_t>> hash_table;
+            if (build_left) {
+                BuildHashTblStr(left, left_col, hash_table);
+                ProbeStr(left, right, right_col, hash_table, results, output_attrs, true);
+            } else {
+                BuildHashTblStr(right, right_col, hash_table);
+                ProbeStr(left, right, left_col, hash_table, results, output_attrs, false);
+            }
         } else {
-            BuildHashTbl(right, right_col, hash_table);
-            Probe(left, right, left_col, hash_table, results, output_attrs, false);
+            std::unordered_map<T, std::vector<size_t>> hash_table;
+            if (build_left) {
+                BuildHashTbl<T>(left, left_col, hash_table);
+                Probe<T>(left, right, right_col, hash_table, results, output_attrs, true);
+            } else {
+                BuildHashTbl<T>(right, right_col, hash_table);
+                Probe<T>(left, right, left_col, hash_table, results, output_attrs, false);
+            }
         }
     }
 };

@@ -1,5 +1,9 @@
+#pragma once
+
 #include <attribute.h>
 #include <plan.h>
+
+#include "data_type_util.h"
 
 #include <cstdint>
 #include <iostream>
@@ -7,51 +11,31 @@
 static uint16_t bottom_three_bits_mask = 0b111;
 
 template <typename T>
-uint16_t AlingDTOffset() {
-    return alignof(T) > 4 ? alignof(T) : 4;
+inline T* DataBegin(Page* page) {
+    return reinterpret_cast<T*>(&(reinterpret_cast<uint8_t*>(page)[AlingDTOffset<T>()]));
 }
 
-static uint16_t AlingDTOffset(DataType data_type) {
-    switch (data_type) {
-    case DataType::INT32:   return AlingDTOffset<int32_t>();
-    case DataType::INT64:   return AlingDTOffset<int64_t>();
-    case DataType::FP64:    return AlingDTOffset<double>();
-    case DataType::VARCHAR: std::abort();
-    }
-    return 42; // unreachable - cpp sucks
+template <>
+inline char* DataBegin(Page* page) = delete;
+template <>
+inline char** DataBegin(Page* page) = delete;
+
+static inline char* DataStrBegin(Page* page) {
+    return &(reinterpret_cast<char*>(page)[4]);
 }
 
-static uint8_t SizeDT(DataType data_type) {
-    switch (data_type) {
-    case DataType::INT32:   return 4;
-    case DataType::INT64:   return 8;
-    case DataType::FP64:    return 8;
-    case DataType::VARCHAR: std::abort();
-    }
-    return 42; // unreachable - cpp sucks
-}
-
-template <typename T>
-T* DataBegin(Page* page) {
-    if constexpr (std::is_same<T, char>()) {
-        std::abort();
-    } else {
-        return reinterpret_cast<T*>(&(reinterpret_cast<uint8_t*>(page)[AlingDTOffset<T>()]));
-    }
-}
-
-static char* GetStr(Page* page, uint16_t non_null_id) {
+static inline char* GetStr(Page* page, uint16_t non_null_id) {
     uint16_t offset =
         non_null_id == 0 ? 4 : reinterpret_cast<uint16_t*>(page)[2 + non_null_id - 1];
     return &(reinterpret_cast<char*>(page)[offset]);
 }
 
-static void* DataBegin(Page* page, DataType data_type) {
+static inline void* DataBegin(Page* page, DataType data_type) {
     switch (data_type) {
     case DataType::INT32:   return DataBegin<int32_t>(page);
     case DataType::INT64:   return DataBegin<int64_t>(page);
     case DataType::FP64:    return DataBegin<double>(page);
-    case DataType::VARCHAR: std::abort();
+    case DataType::VARCHAR: assert(false);
     }
     return nullptr; // unreachable - cpp sucks
 }
@@ -63,7 +47,7 @@ struct PageDescriptor {
     uint8_t  curr_free_slots_in_last_bitmap_byte;
     uint16_t curr_next_data_begin_offset;
 
-    uint8_t* BitMapBegin(Page* page) {
+    inline uint8_t* BitMapBegin(Page* page) {
         return &(reinterpret_cast<uint8_t*>(page)[PAGE_SIZE - bitmap_size]);
     }
 };
@@ -117,11 +101,6 @@ struct SensibleColumn {
         }
     }
 };
-
-// void* GetValueClmn(size_t record_id,
-//     SensibleColumn&       clm,
-//     bool*                 is_large_str,
-//     size_t*               page_id_of_large_str_or_str_len);
 
 struct SensibleColumnarTable {
     size_t                      num_rows = 0;
@@ -178,6 +157,10 @@ void AppendValue(T* value, SensibleColumn& clm) {
     page_info.curr_free_slots_in_last_bitmap_byte -= 1;
 }
 
+template <>
+void AppendValue<char>(char* value, SensibleColumn& clm) = delete;
+template <>
+void AppendValue<char*>(char** value, SensibleColumn& clm) = delete;
 
 static void AppendLargStr(char* value, size_t space_for_value, SensibleColumn& clm) {
     PageDescriptor& page_info = clm.page_meta.back();
@@ -216,7 +199,6 @@ static void AppendLargStr(char* value, size_t space_for_value, SensibleColumn& c
         }
     }
 }
-
 
 static void AppendStr(void* value, size_t str_len, SensibleColumn& clm) {
     if (clm.pages.size() == 0) {
@@ -292,7 +274,6 @@ static void AppendStr(void* value, size_t str_len, SensibleColumn& clm) {
     page_info.curr_free_slots_in_last_bitmap_byte -= 1;
 }
 
-
 static void AppendNull(SensibleColumn& clm) {
     if (clm.pages.size() == 0) {
         clm.AddPage();
@@ -332,8 +313,6 @@ static void AppendNull(SensibleColumn& clm) {
     page_info.curr_free_slots_in_last_bitmap_byte -= 1;
 }
 
-
-// Sigh*
 static void AppendAttr(void* value, SensibleColumn& clm) {
     if (value != nullptr) {
         switch (clm.type) {
@@ -344,47 +323,20 @@ static void AppendAttr(void* value, SensibleColumn& clm) {
             AppendValue<int64_t>(reinterpret_cast<int64_t*>(value), clm);
             break;
         case DataType::FP64:    AppendValue<double>(reinterpret_cast<double*>(value), clm); break;
-        case DataType::VARCHAR: std::abort(); break;
+        case DataType::VARCHAR: assert(false); break;
         }
     } else {
         AppendNull(clm);
     }
 }
 
-static uint8_t Sizeof(DataType data_type) {
-    switch (data_type) {
-    case DataType::INT32:   return 4;
-    case DataType::INT64:   return 8;
-    case DataType::FP64:    return 8;
-    case DataType::VARCHAR: std::abort();
-    }
-    return 42; // unreachable - cpp sucks
-}
-
-static const char* dt_strs[4] = {
-    "i32",
-    "i64",
-    "fp64",
-    "string",
-};
-
-static const char* DtToString(DataType data_type) {
-    switch (data_type) {
-    case DataType::INT32:   return dt_strs[0];
-    case DataType::INT64:   return dt_strs[1];
-    case DataType::FP64:    return dt_strs[2];
-    case DataType::VARCHAR: return dt_strs[3];
-    }
-    return nullptr; // unreachable - cpp sucks
-}
-
 // TODO: this is not great
 static void* GetValueClmnPage(size_t page_record_id,
-    Page*                     page,
-    PageDescriptor&           page_info,
-    DataType                  data_type,
-    bool*                     is_large_str,
-    size_t*                   str_len) {
+    Page*                            page,
+    PageDescriptor&                  page_info,
+    DataType                         data_type,
+    bool*                            is_large_str,
+    size_t*                          str_len) {
     if (data_type == DataType::VARCHAR && page_info.rows_in_page == 0xffffu) {
         *is_large_str = true;
         return page;
@@ -427,9 +379,9 @@ static void* GetValueClmnPage(size_t page_record_id,
 }
 
 static void* GetValueClmn(size_t record_id,
-    SensibleColumn&       clm,
-    bool*                 is_large_str,
-    size_t*               page_id_of_large_str_or_str_len) {
+    SensibleColumn&              clm,
+    bool*                        is_large_str,
+    size_t*                      page_id_of_large_str_or_str_len) {
     size_t page_cnt = clm.pages.size();
     size_t row_cnt  = 0;
     for (size_t i = 0; i < page_cnt; i += 1) {
@@ -464,20 +416,9 @@ static void* GetValueClmn(size_t record_id,
     return nullptr; // unreachable
 }
 
-static void PrintVal(void* value, DataType data_type) {
-    if (value == nullptr) {
-        std::cout << "Null\t";
-        return;
-    }
-    switch (data_type) {
-    case DataType::INT32:   std::cout << *reinterpret_cast<int32_t*>(value) << "\t"; break;
-    case DataType::INT64:   std::cout << *reinterpret_cast<int64_t*>(value) << "\t"; break;
-    case DataType::FP64:    std::cout << *reinterpret_cast<double*>(value) << "\t"; break;
-    case DataType::VARCHAR: std::cout << reinterpret_cast<char*>(value) << "\t"; break;
-    }
-}
+// Debug area:
 
-static char* SpliceLargeString(size_t start_page_id, SensibleColumn& clm) {
+static char* ConcatLargeString(size_t start_page_id, SensibleColumn& clm) {
     size_t total_len = PAGE_SIZE - 7;
     for (size_t i = start_page_id + 1; i < clm.pages.size(); i += 1) {
         uint16_t* u16_p = reinterpret_cast<uint16_t*>(clm.pages[i]);
@@ -515,7 +456,7 @@ static void PrintRow(SensibleColumnarTable& tbl, size_t row_id) {
             PrintVal(value, tbl.columns[j].type);
         } else {
             if (is_large_str) {
-                value = SpliceLargeString(page_id_large_str_or_str_len, tbl.columns[j]);
+                value = ConcatLargeString(page_id_large_str_or_str_len, tbl.columns[j]);
                 PrintVal(value, tbl.columns[j].type);
                 free(value);
             } else {
@@ -539,4 +480,3 @@ static void PrintTbl(SensibleColumnarTable& tbl, int64_t max_row_print) {
         PrintRow(tbl, i);
     }
 }
-
