@@ -562,3 +562,33 @@ static void PrintTbl(SensibleColumnarTable& tbl, int64_t max_row_print) {
         PrintRow(tbl, i);
     }
 }
+
+static void PrintClmStats(SensibleColumn& clm) {
+    const char* type_name = DtToString(clm.type);
+    std::cout << "Clm Stats:\nType: " << type_name << "\nNum Pages: " << clm.pages.size();
+    if (clm.type == DataType::VARCHAR) {
+        size_t big_str_cnt      = 0;
+        size_t big_str_cnt_page = 0;
+        for (size_t i = 0; i < clm.pages.size(); i += 1) {
+            if (clm.pages[i].page_info.type == PageType::LargeStrFirst) {
+                big_str_cnt++;
+                big_str_cnt_page++;
+            }
+            if (clm.pages[i].page_info.type == PageType::LargeStrSubsequent) {
+                big_str_cnt_page++;
+            }
+        }
+        std::cout << " Num Big strs: " << big_str_cnt
+                  << " Num pages for big str: " << big_str_cnt_page;
+    }
+    std::cout << "\n";
+}
+
+static void PrintTblStats(SensibleColumnarTable& tbl) {
+    std::cout << "Table Stats:\n\nNum Clms: " << tbl.columns.size()
+              << "\nNum Rows: " << tbl.num_rows << std::endl;
+    for (size_t i = 0; i < tbl.columns.size(); i += 1) {
+        PrintClmStats(tbl.columns[i]);
+    }
+    std::cout << std::endl;
+}
