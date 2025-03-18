@@ -543,6 +543,9 @@ SensibleColumnarTable execute_hash_join(const Plan&  plan,
     for (size_t i = 0; i < output_attrs.size(); i += 1) {
         results.columns.emplace_back(std::get<1>(output_attrs[i]));
     }
+    if (left.columns.size() == 0 || right.columns.size() == 0 || output_attrs.size() == 0) {
+        return results;
+    }
 
     JoinAlgorithm join_algorithm{.build_left = join.build_left,
         .left                                = left,
@@ -580,8 +583,13 @@ SensibleColumnarTable execute_scan(const Plan&       plan,
     // ZoneScoped;
     auto   table_id   = scan.base_table_id;
     auto&  input      = plan.inputs[table_id];
-    size_t column_cnt = output_attrs.size();
     size_t record_cnt = input.num_rows;
+    size_t column_cnt = 0;
+    for (size_t i = 0; i < output_attrs.size(); i += 1) {
+        if (std::get<0>(output_attrs[i]) < input.columns.size()) {
+            column_cnt++;
+        }
+    }
 
     SensibleColumnarTable result;
     result.num_rows = record_cnt;
