@@ -33,19 +33,27 @@ InsertToHashmap(std::unordered_map<T, std::vector<size_t>>& tbl, T& key, size_t 
 }
 
 inline void InsertStrToHashmap(std::unordered_map<std::string, std::vector<size_t>>& tbl,
-    void*                                                                            str,
-    uint16_t current_str_len,
-    size_t   id) {
-    // This is a quick workaround to make the non null terminated string in
-    // the pages work with the hashmap, by using std::string which we
-    // construct from a null terminated char* that we create here
-    // temporarily
-    char* tmp_str = (char*)malloc(current_str_len + 1);
-    memcpy(tmp_str, str, current_str_len);
-    tmp_str[current_str_len] = '\0';
+    size_t                                                                           id,
+    void*                                                                            page,
+    uint16_t* current_str_begin,
+    uint16_t* current_non_null_id,
+    uint16_t  str_base_offset) {
+    uint16_t* u16_p   = reinterpret_cast<uint16_t*>(page);
+    uint8_t*  u8_p    = reinterpret_cast<uint8_t*>(page);
+    void*     str     = &u8_p[*current_str_begin];
+    uint16_t  str_end = u16_p[*current_non_null_id + 2] + str_base_offset;
+    uint16_t  str_len = str_end - *current_str_begin;
+
+    // TODO: I'm sure one of the 20 constructors could do this without this copy
+    char* tmp_str = (char*)malloc(str_len + 1);
+    memcpy(tmp_str, str, str_len);
+    tmp_str[str_len] = '\0';
     std::string key(tmp_str);
     free(tmp_str);
     InsertToHashmap<std::string>(tbl, key, id);
+
+    *current_non_null_id += 1;
+    *current_str_begin    = str_end;
 }
 
 template <typename T>
@@ -109,25 +117,24 @@ void BuildHashTblStr(SensibleColumnarTable&               input_tbl,
     for (size_t i = 0; i < page_cnt; i += 1) { // TODO: do the parallelisation here
         Page*          cur_page     = clm_to_hash.pages[i].page;
         PageDescriptor page_info_   = clm_to_hash.pages[i].page_info;
-        char*          data         = DataStrBegin(cur_page);
-        uint16_t*      u16_p        = reinterpret_cast<uint16_t*>(cur_page);
         uint8_t*       bitmap_begin = page_info_.BitMapBegin(cur_page);
         size_t         id           = items_in_prev_pages;
 
         switch (page_info_.type) {
         case PageType::Regular: {
-            RegularPageDescriptor page_info                = page_info_.regular;
-            uint16_t              processed                = 0;
-            uint16_t              cur_bitmap_id            = 0;
-            uint16_t              str_base_offset          = page_info.non_null_in_page * 2 + 4;
-            uint16_t              current_str_begin_offset = str_base_offset;
+            RegularPageDescriptor page_info         = page_info_.regular;
+            uint16_t              processed         = 0;
+            uint16_t              cur_bitmap_id     = 0;
+            uint16_t              str_base_offset   = page_info.non_null_in_page * 2 + 4;
+            uint16_t              current_str_begin = str_base_offset;
             if (page_info.rows_in_page == page_info.non_null_in_page) {
                 for (size_t j = 0; j < page_info.rows_in_page; j += 1) {
-                    void*    str             = &data[current_str_begin_offset];
-                    uint16_t current_str_len = u16_p[processed];
-                    InsertStrToHashmap(tbl, str, current_str_len, id);
-                    current_str_begin_offset += current_str_len;
-                    processed++;
+                    InsertStrToHashmap(tbl,
+                        id,
+                        cur_page,
+                        &current_str_begin,
+                        &processed,
+                        str_base_offset);
                     id++;
                 }
             } else {
@@ -137,11 +144,12 @@ void BuildHashTblStr(SensibleColumnarTable&               input_tbl,
                     if (bitmap_begin[cur_bitmap_id] == u8_max) {
                         // Full byte not null
                         for (size_t i = 0; i < 8; i += 1) {
-                            void*    str             = &data[current_str_begin_offset];
-                            uint16_t current_str_len = u16_p[processed];
-                            InsertStrToHashmap(tbl, str, current_str_len, id);
-                            current_str_begin_offset += current_str_len;
-                            processed++;
+                            InsertStrToHashmap(tbl,
+                                id,
+                                cur_page,
+                                &current_str_begin,
+                                &processed,
+                                str_base_offset);
                             id++;
                         }
                     } else {
@@ -150,13 +158,17 @@ void BuildHashTblStr(SensibleColumnarTable&               input_tbl,
                         for (uint8_t intra_bitmap_id  = 0; intra_bitmap_id < 8;
                             intra_bitmap_id          += 1) {
                             if ((current_byte & (1 << intra_bitmap_id)) != 0) {
-                                void*    str             = &data[current_str_begin_offset];
-                                uint16_t current_str_len = u16_p[processed];
-                                InsertStrToHashmap(tbl, str, current_str_len, id);
-                                current_str_begin_offset += current_str_len;
-                                processed++;
+                                InsertStrToHashmap(tbl,
+                                    id,
+                                    cur_page,
+                                    &current_str_begin,
+                                    &processed,
+                                    str_base_offset);
                             }
                             id++;
+                            if (processed >= page_info.non_null_in_page) {
+                                break;
+                            }
                         }
                     }
                     cur_bitmap_id += 1;
@@ -260,14 +272,22 @@ inline void ProbeAndCollect(std::unordered_map<T, std::vector<size_t>>& tbl,
 }
 
 inline void ProbeAndCollectStr(std::unordered_map<std::string, std::vector<size_t>>& tbl,
-    void*                                                                            str,
-    size_t                                                                           str_len,
     SensibleColumnarTable&                                                           tbl_l,
     SensibleColumnarTable&                                                           tbl_r,
     SensibleColumnarTable&                                                           results,
     bool                                             hashed_is_left,
     size_t                                           curr_id,
-    const std::vector<std::tuple<size_t, DataType>>& output_attrs) {
+    const std::vector<std::tuple<size_t, DataType>>& output_attrs,
+    void*                                            page,
+    uint16_t*                                        current_non_null,
+    uint16_t*                                        current_str_begin,
+    uint16_t                                         str_base_offset) {
+    uint8_t*  u8_p    = reinterpret_cast<uint8_t*>(page);
+    uint16_t* u16_p   = reinterpret_cast<uint16_t*>(page);
+    void*     str     = &u8_p[*current_str_begin];
+    uint16_t  str_end = u16_p[*current_non_null + 2] + str_base_offset;
+    uint16_t  str_len = str_end - *current_str_begin;
+
     // TODO: I'm sure one of the 20 constructors could do this without this copy
     char* tmp_str = (char*)malloc(str_len + 1);
     memcpy(tmp_str, str, str_len);
@@ -287,6 +307,9 @@ inline void ProbeAndCollectStr(std::unordered_map<std::string, std::vector<size_
         }
     }
     free(tmp_str);
+
+    *current_str_begin  = str_end;
+    *current_non_null  += 1;
 }
 
 template <typename T>
@@ -301,12 +324,11 @@ void Probe(SensibleColumnarTable&               tbl_l,
     const std::vector<std::tuple<size_t, DataType>>& output_attrs,
     bool                                             hashed_is_left) {
     // ZoneScoped;
-
     SensibleColumnarTable& non_hashed_tbl = hashed_is_left ? tbl_r : tbl_l;
+    SensibleColumn&        clm_to_check   = non_hashed_tbl.columns[col_id_of_non_hashed_in];
 
-    SensibleColumn& clm_to_check        = non_hashed_tbl.columns[col_id_of_non_hashed_in];
-    size_t          page_cnt            = clm_to_check.pages.size();
-    size_t          items_in_prev_pages = 0;
+    size_t page_cnt            = clm_to_check.pages.size();
+    size_t items_in_prev_pages = 0;
     for (size_t i = 0; i < page_cnt; i += 1) { // TODO: do the parallelisation here
         Page*                  cur_page     = clm_to_check.pages[i].page;
         PageDescriptor&        page_info_   = clm_to_check.pages[i].page_info;
@@ -393,33 +415,29 @@ void ProbeStr(SensibleColumnarTable&                      tbl_l,
     for (size_t i = 0; i < page_cnt; i += 1) { // TODO: do the parallelisation here
         Page*           cur_page     = clm_to_check.pages[i].page;
         PageDescriptor& page_info_   = clm_to_check.pages[i].page_info;
-        char*           data         = DataStrBegin(cur_page);
-        uint16_t*       u16_p        = reinterpret_cast<uint16_t*>(cur_page);
         uint8_t*        bitmap_begin = page_info_.BitMapBegin(cur_page);
         size_t          curr_id      = items_handled_in_prev_pages;
 
         switch (page_info_.type) {
         case PageType::Regular: {
-            RegularPageDescriptor& page_info        = page_info_.regular;
-            uint16_t               curr_non_null_id = 0;
-            uint16_t               cur_bitmap_id    = 0;
-            uint16_t               str_base_offset  = page_info.non_null_in_page * 2 + 4;
-            uint16_t               current_str_begin_offset = str_base_offset;
+            RegularPageDescriptor& page_info         = page_info_.regular;
+            uint16_t               curr_non_null_id  = 0;
+            uint16_t               cur_bitmap_id     = 0;
+            uint16_t               str_base_offset   = page_info.non_null_in_page * 2 + 4;
+            uint16_t               current_str_begin = str_base_offset;
             if (page_info.rows_in_page == page_info.non_null_in_page) {
                 for (size_t j = 0; j < page_info.rows_in_page; j += 1) {
-                    void*    str             = &data[current_str_begin_offset];
-                    uint16_t current_str_len = u16_p[curr_id + 2];
                     ProbeAndCollectStr(tbl,
-                        str,
-                        current_str_len,
                         tbl_l,
                         tbl_r,
                         results,
                         hashed_is_left,
                         curr_id,
-                        output_attrs);
-                    current_str_begin_offset += current_str_len;
-                    curr_non_null_id++;
+                        output_attrs,
+                        cur_page,
+                        &curr_non_null_id,
+                        &current_str_begin,
+                        str_base_offset);
                     curr_id++;
                 }
             } else {
@@ -427,19 +445,17 @@ void ProbeStr(SensibleColumnarTable&                      tbl_l,
                     if (bitmap_begin[cur_bitmap_id] == u8_max) {
                         // Full byte not null
                         for (size_t j = 0; j < 8; j += 1) {
-                            void*    str             = &data[current_str_begin_offset];
-                            uint16_t current_str_len = u16_p[curr_id + 2];
                             ProbeAndCollectStr(tbl,
-                                str,
-                                current_str_len,
                                 tbl_l,
                                 tbl_r,
                                 results,
                                 hashed_is_left,
                                 curr_id,
-                                output_attrs);
-                            current_str_begin_offset += current_str_len;
-                            curr_non_null_id++;
+                                output_attrs,
+                                cur_page,
+                                &curr_non_null_id,
+                                &current_str_begin,
+                                str_base_offset);
                             curr_id++;
                         }
                     } else {
@@ -448,24 +464,22 @@ void ProbeStr(SensibleColumnarTable&                      tbl_l,
                         for (uint8_t intra_bitmap_id  = 0; intra_bitmap_id < 8;
                             intra_bitmap_id          += 1) {
                             if ((current_byte & (1 << intra_bitmap_id)) != 0) {
-                                void*    str             = &data[current_str_begin_offset];
-                                uint16_t current_str_len = u16_p[curr_id + 2];
                                 ProbeAndCollectStr(tbl,
-                                    str,
-                                    current_str_len,
                                     tbl_l,
                                     tbl_r,
                                     results,
                                     hashed_is_left,
                                     curr_id,
-                                    output_attrs);
-                                current_str_begin_offset += current_str_len;
-                                curr_non_null_id++;
-                                if (curr_non_null_id >= page_info.non_null_in_page) {
-                                    break;
-                                }
+                                    output_attrs,
+                                    cur_page,
+                                    &curr_non_null_id,
+                                    &current_str_begin,
+                                    str_base_offset);
                             }
                             curr_id++;
+                            if (curr_non_null_id >= page_info.non_null_in_page) {
+                                break;
+                            }
                         }
                     }
                     cur_bitmap_id += 1;
