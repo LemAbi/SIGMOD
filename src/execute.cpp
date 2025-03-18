@@ -98,9 +98,9 @@ void BuildHashTbl(SensibleColumnarTable&        input_tbl,
                             InsertToHashmap<T>(tbl, data[processed++], id);
                         }
                         id++;
-						if (processed >= page_info.non_null_in_page) {
-							break;
-						}
+                        if (processed >= page_info.non_null_in_page) {
+                            break;
+                        }
                     }
                 }
                 cur_bitmap_id += 1;
@@ -252,6 +252,18 @@ void CollectRecord(SensibleColumnarTable&            tbl_l,
 }
 
 template <typename T>
+bool ValidateJoinMatch(size_t l_col_id,
+    size_t                    r_col_id,
+    size_t                    l_row_id,
+    size_t                    r_row_id,
+    SensibleColumnarTable&    tbl_l,
+    SensibleColumnarTable&    tbl_r) {
+    T* val_l = (T*)GetValueClmn(l_row_id, tbl_l.columns[l_col_id], nullptr, nullptr);
+    T* val_r = (T*)GetValueClmn(r_row_id, tbl_r.columns[r_col_id], nullptr, nullptr);
+    return *val_l == *val_r;
+}
+
+template <typename T>
 inline void ProbeAndCollect(std::unordered_map<T, std::vector<size_t>>& tbl,
     T&                                                                  key,
     SensibleColumnarTable&                                              tbl_l,
@@ -259,11 +271,23 @@ inline void ProbeAndCollect(std::unordered_map<T, std::vector<size_t>>& tbl,
     SensibleColumnarTable&                                              results,
     bool                                                                hashed_is_left,
     size_t                                                              curr_id,
-    const std::vector<std::tuple<size_t, DataType>>&                    output_attrs) {
+    const std::vector<std::tuple<size_t, DataType>>&                    output_attrs,
+    size_t                                                              l_col_id,
+    size_t                                                              r_col_id) {
     if (auto itr = tbl.find(key); itr != tbl.end()) {
         std::vector<size_t>& matches   = itr->second;
         size_t               match_cnt = matches.size();
         for (size_t k = 0; k < match_cnt; k += 1) {
+            if constexpr (!std::is_same<T, std::string>()) {
+                if (!ValidateJoinMatch<T>(l_col_id,
+                        r_col_id,
+                        hashed_is_left ? matches[k] : curr_id,
+                        hashed_is_left ? curr_id : matches[k],
+                        tbl_l,
+                        tbl_r)) {
+                    std::abort();
+                }
+            }
             CollectRecord(tbl_l,
                 tbl_r,
                 results,
@@ -319,6 +343,8 @@ template <typename T>
 void Probe(SensibleColumnarTable&               tbl_l,
     SensibleColumnarTable&                      tbl_r,
     size_t                                      col_id_of_non_hashed_in,
+    size_t                                      l_col_id,
+    size_t                                      r_col_id,
     std::unordered_map<T, std::vector<size_t>>& tbl,
     // TODO: when para -> use one result table for each and then "merge" which is just
     // collecting the pages per column in one result table i.e. no need to actually cpy
@@ -352,7 +378,9 @@ void Probe(SensibleColumnarTable&               tbl_l,
                     results,
                     hashed_is_left,
                     curr_id,
-                    output_attrs);
+                    output_attrs,
+                    l_col_id,
+                    r_col_id);
                 curr_id++;
             }
         } else {
@@ -367,7 +395,9 @@ void Probe(SensibleColumnarTable&               tbl_l,
                             results,
                             hashed_is_left,
                             curr_id,
-                            output_attrs);
+                            output_attrs,
+                            l_col_id,
+                            r_col_id);
                         curr_id++;
                     }
                 } else {
@@ -384,7 +414,9 @@ void Probe(SensibleColumnarTable&               tbl_l,
                                 results,
                                 hashed_is_left,
                                 curr_id,
-                                output_attrs);
+                                output_attrs,
+                                l_col_id,
+                                r_col_id);
                         }
                         curr_id++;
                         if (curr_non_null_id >= page_info.non_null_in_page) {
@@ -501,7 +533,9 @@ void ProbeStr(SensibleColumnarTable&                      tbl_l,
                 results,
                 hashed_is_left,
                 curr_id,
-                output_attrs);
+                output_attrs,
+                0,
+                0);
             free(long_str);
             items_handled_in_prev_pages += 1;
             break;
@@ -535,10 +569,26 @@ struct JoinAlgorithm {
             std::unordered_map<T, std::vector<size_t>> hash_table;
             if (build_left) {
                 BuildHashTbl<T>(left, left_col, hash_table);
-                Probe<T>(left, right, right_col, hash_table, results, output_attrs, true);
+                Probe<T>(left,
+                    right,
+                    right_col,
+                    left_col,
+                    right_col,
+                    hash_table,
+                    results,
+                    output_attrs,
+                    true);
             } else {
                 BuildHashTbl<T>(right, right_col, hash_table);
-                Probe<T>(left, right, left_col, hash_table, results, output_attrs, false);
+                Probe<T>(left,
+                    right,
+                    left_col,
+                    left_col,
+                    right_col,
+                    hash_table,
+                    results,
+                    output_attrs,
+                    false);
             }
         }
     }
