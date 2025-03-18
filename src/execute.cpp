@@ -237,6 +237,59 @@ void CollectRecord(SensibleColumnarTable&            tbl_l,
 }
 
 template <typename T>
+inline void ProbeAndCollect(std::unordered_map<T, std::vector<size_t>>& tbl,
+    T&                                                                  key,
+    SensibleColumnarTable&                                              tbl_l,
+    SensibleColumnarTable&                                              tbl_r,
+    SensibleColumnarTable&                                              results,
+    bool                                                                hashed_is_left,
+    size_t                                                              curr_id,
+    const std::vector<std::tuple<size_t, DataType>>&                    output_attrs) {
+    if (auto itr = tbl.find(key); itr != tbl.end()) {
+        std::vector<size_t>& matches   = itr->second;
+        size_t               match_cnt = matches.size();
+        for (size_t k = 0; k < match_cnt; k += 1) {
+            CollectRecord(tbl_l,
+                tbl_r,
+                results,
+                hashed_is_left ? matches[k] : curr_id,
+                hashed_is_left ? curr_id : matches[k],
+                output_attrs);
+        }
+    }
+}
+
+inline void ProbeAndCollectStr(std::unordered_map<std::string, std::vector<size_t>>& tbl,
+    void*                                                                            str,
+    size_t                                                                           str_len,
+    SensibleColumnarTable&                                                           tbl_l,
+    SensibleColumnarTable&                                                           tbl_r,
+    SensibleColumnarTable&                                                           results,
+    bool                                             hashed_is_left,
+    size_t                                           curr_id,
+    const std::vector<std::tuple<size_t, DataType>>& output_attrs) {
+    // TODO: I'm sure one of the 20 constructors could do this without this copy
+    char* tmp_str = (char*)malloc(str_len + 1);
+    memcpy(tmp_str, str, str_len);
+    tmp_str[str_len] = '\0';
+    std::string key(tmp_str);
+
+    if (auto itr = tbl.find(key); itr != tbl.end()) {
+        std::vector<size_t>& matches   = itr->second;
+        size_t               match_cnt = matches.size();
+        for (size_t k = 0; k < match_cnt; k += 1) {
+            CollectRecord(tbl_l,
+                tbl_r,
+                results,
+                hashed_is_left ? matches[k] : curr_id,
+                hashed_is_left ? curr_id : matches[k],
+                output_attrs);
+        }
+    }
+    free(tmp_str);
+}
+
+template <typename T>
 void Probe(SensibleColumnarTable&               tbl_l,
     SensibleColumnarTable&                      tbl_r,
     size_t                                      col_id_of_non_hashed_in,
@@ -267,18 +320,14 @@ void Probe(SensibleColumnarTable&               tbl_l,
         if (page_info.rows_in_page == page_info.non_null_in_page) {
             for (size_t j = 0; j < page_info.rows_in_page; j += 1) {
                 T& key = data[curr_non_null_id++];
-                if (auto itr = tbl.find(key); itr != tbl.end()) {
-                    std::vector<size_t>& matches   = itr->second;
-                    size_t               match_cnt = matches.size();
-                    for (size_t k = 0; k < match_cnt; k += 1) {
-                        CollectRecord(tbl_l,
-                            tbl_r,
-                            results,
-                            hashed_is_left ? matches[k] : curr_id,
-                            hashed_is_left ? curr_id : matches[k],
-                            output_attrs);
-                    }
-                }
+                ProbeAndCollect(tbl,
+                    key,
+                    tbl_l,
+                    tbl_r,
+                    results,
+                    hashed_is_left,
+                    curr_id,
+                    output_attrs);
                 curr_id++;
             }
         } else {
@@ -286,18 +335,14 @@ void Probe(SensibleColumnarTable&               tbl_l,
                 if (bitmap_begin[cur_bitmap_id] == u8_max) { // Full byte not null
                     for (size_t j = 0; j < 8; j += 1) {
                         T& key = data[curr_non_null_id++];
-                        if (auto itr = tbl.find(key); itr != tbl.end()) {
-                            std::vector<size_t>& matches   = itr->second;
-                            size_t               match_cnt = matches.size();
-                            for (size_t k = 0; k < match_cnt; k += 1) {
-                                CollectRecord(tbl_l,
-                                    tbl_r,
-                                    results,
-                                    hashed_is_left ? matches[k] : curr_id,
-                                    hashed_is_left ? curr_id : matches[k],
-                                    output_attrs);
-                            }
-                        }
+                        ProbeAndCollect(tbl,
+                            key,
+                            tbl_l,
+                            tbl_r,
+                            results,
+                            hashed_is_left,
+                            curr_id,
+                            output_attrs);
                         curr_id++;
                     }
                 } else {
@@ -307,18 +352,14 @@ void Probe(SensibleColumnarTable&               tbl_l,
                         intra_bitmap_id          += 1) {
                         if ((current_byte & (1 << intra_bitmap_id)) != 0) {
                             T& key = data[curr_non_null_id++];
-                            if (auto itr = tbl.find(key); itr != tbl.end()) {
-                                std::vector<size_t>& matches   = itr->second;
-                                size_t               match_cnt = matches.size();
-                                for (size_t j = 0; j < match_cnt; j += 1) {
-                                    CollectRecord(tbl_l,
-                                        tbl_r,
-                                        results,
-                                        hashed_is_left ? matches[j] : curr_id,
-                                        hashed_is_left ? curr_id : matches[j],
-                                        output_attrs);
-                                }
-                            }
+                            ProbeAndCollect(tbl,
+                                key,
+                                tbl_l,
+                                tbl_r,
+                                results,
+                                hashed_is_left,
+                                curr_id,
+                                output_attrs);
                         }
                         curr_id++;
                         if (curr_non_null_id >= page_info.non_null_in_page) {
@@ -368,27 +409,15 @@ void ProbeStr(SensibleColumnarTable&                      tbl_l,
                 for (size_t j = 0; j < page_info.rows_in_page; j += 1) {
                     void*    str             = &data[current_str_begin_offset];
                     uint16_t current_str_len = u16_p[curr_id + 2];
-
-                    // Same workaround as in build
-                    char* tmp_str = (char*)malloc(current_str_len + 1);
-                    memcpy(tmp_str, str, current_str_len);
-                    tmp_str[current_str_len] = '\0';
-
-                    std::string key(tmp_str);
-                    if (auto itr = tbl.find(key); itr != tbl.end()) {
-                        std::vector<size_t>& matches   = itr->second;
-                        size_t               match_cnt = matches.size();
-                        for (size_t k = 0; k < match_cnt; k += 1) {
-                            CollectRecord(tbl_l,
-                                tbl_r,
-                                results,
-                                hashed_is_left ? matches[k] : curr_id,
-                                hashed_is_left ? curr_id : matches[k],
-                                output_attrs);
-                        }
-                    }
-                    free(tmp_str);
-
+                    ProbeAndCollectStr(tbl,
+                        str,
+                        current_str_len,
+                        tbl_l,
+                        tbl_r,
+                        results,
+                        hashed_is_left,
+                        curr_id,
+                        output_attrs);
                     current_str_begin_offset += current_str_len;
                     curr_non_null_id++;
                     curr_id++;
@@ -400,27 +429,15 @@ void ProbeStr(SensibleColumnarTable&                      tbl_l,
                         for (size_t j = 0; j < 8; j += 1) {
                             void*    str             = &data[current_str_begin_offset];
                             uint16_t current_str_len = u16_p[curr_id + 2];
-
-                            // Same workaround as in build
-                            char* tmp_str = (char*)malloc(current_str_len + 1);
-                            memcpy(tmp_str, str, current_str_len);
-                            tmp_str[current_str_len] = '\0';
-
-                            std::string key(tmp_str);
-                            if (auto itr = tbl.find(key); itr != tbl.end()) {
-                                std::vector<size_t>& matches   = itr->second;
-                                size_t               match_cnt = matches.size();
-                                for (size_t k = 0; k < match_cnt; k += 1) {
-                                    CollectRecord(tbl_l,
-                                        tbl_r,
-                                        results,
-                                        hashed_is_left ? matches[k] : curr_id,
-                                        hashed_is_left ? curr_id : matches[k],
-                                        output_attrs);
-                                }
-                            }
-                            free(tmp_str);
-
+                            ProbeAndCollectStr(tbl,
+                                str,
+                                current_str_len,
+                                tbl_l,
+                                tbl_r,
+                                results,
+                                hashed_is_left,
+                                curr_id,
+                                output_attrs);
                             current_str_begin_offset += current_str_len;
                             curr_non_null_id++;
                             curr_id++;
@@ -433,27 +450,15 @@ void ProbeStr(SensibleColumnarTable&                      tbl_l,
                             if ((current_byte & (1 << intra_bitmap_id)) != 0) {
                                 void*    str             = &data[current_str_begin_offset];
                                 uint16_t current_str_len = u16_p[curr_id + 2];
-
-                                // Same workaround as in build
-                                char* tmp_str = (char*)malloc(current_str_len + 1);
-                                memcpy(tmp_str, str, current_str_len);
-                                tmp_str[current_str_len] = '\0';
-
-                                std::string key(tmp_str);
-                                if (auto itr = tbl.find(key); itr != tbl.end()) {
-                                    std::vector<size_t>& matches   = itr->second;
-                                    size_t               match_cnt = matches.size();
-                                    for (size_t j = 0; j < match_cnt; j += 1) {
-                                        CollectRecord(tbl_l,
-                                            tbl_r,
-                                            results,
-                                            hashed_is_left ? matches[j] : curr_id,
-                                            hashed_is_left ? curr_id : matches[j],
-                                            output_attrs);
-                                    }
-                                }
-                                free(tmp_str);
-
+                                ProbeAndCollectStr(tbl,
+                                    str,
+                                    current_str_len,
+                                    tbl_l,
+                                    tbl_r,
+                                    results,
+                                    hashed_is_left,
+                                    curr_id,
+                                    output_attrs);
                                 current_str_begin_offset += current_str_len;
                                 curr_non_null_id++;
                                 if (curr_non_null_id >= page_info.non_null_in_page) {
@@ -472,18 +477,14 @@ void ProbeStr(SensibleColumnarTable&                      tbl_l,
         case PageType::LargeStrFirst: {
             char*       long_str = ConcatLargeString(i, clm_to_check);
             std::string key(long_str);
-            if (auto itr = tbl.find(key); itr != tbl.end()) {
-                std::vector<size_t>& matches   = itr->second;
-                size_t               match_cnt = matches.size();
-                for (size_t j = 0; j < match_cnt; j += 1) {
-                    CollectRecord(tbl_l,
-                        tbl_r,
-                        results,
-                        hashed_is_left ? matches[j] : curr_id,
-                        hashed_is_left ? curr_id : matches[j],
-                        output_attrs);
-                }
-            }
+            ProbeAndCollect(tbl,
+                key,
+                tbl_l,
+                tbl_r,
+                results,
+                hashed_is_left,
+                curr_id,
+                output_attrs);
             free(long_str);
             items_handled_in_prev_pages += 1;
             break;
