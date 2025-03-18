@@ -1,10 +1,11 @@
 #pragma once
 
-#include "../build/_deps/tracy-src/public/tracy/Tracy.hpp"
+// #include "../build/_deps/tracy-src/public/tracy/Tracy.hpp"
 
 #include <atomic>
 #include <thread>
 #include <vector>
+#include <mutex>
 
 enum class WorkItemType {
     Join_Probe,
@@ -37,9 +38,13 @@ struct WorkItem {
         }
     }
 
-    void ExecuteProbe() { ZoneScoped; }
+    void ExecuteProbe() {
+        // ZoneScoped;
+    }
 
-    void ExecuteBuild() { ZoneScoped; }
+    void ExecuteBuild() {
+        // ZoneScoped;
+    }
 };
 
 struct ExecContext;
@@ -74,7 +79,7 @@ struct ExecContext {
 };
 
 static void WorkerEventLoop(uint32_t thread_id, ExecContext* ctx) {
-    ZoneScoped;
+    // ZoneScoped;
     std::mutex*            q_lck           = &ctx->work_access_lck;
     std::atomic<uint32_t>* work_count      = &ctx->work_item_count;
     std::atomic<bool>*     should_shutdown = &ctx->shutdown_requested;
@@ -103,4 +108,3 @@ static void WorkerEventLoop(uint32_t thread_id, ExecContext* ctx) {
         }
     }
 }
-

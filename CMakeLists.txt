@@ -6,16 +6,18 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=address -g")
+
 Include(FetchContent)
 
-FetchContent_Declare (
-    tracy
-    GIT_REPOSITORY https://github.com/wolfpld/tracy.git
-    GIT_TAG master
-    GIT_SHALLOW TRUE
-    GIT_PROGRESS TRUE
-)
-FetchContent_MakeAvailable(tracy)
+# FetchContent_Declare (
+#     tracy
+#     GIT_REPOSITORY https://github.com/wolfpld/tracy.git
+#     GIT_TAG master
+#     GIT_SHALLOW TRUE
+#     GIT_PROGRESS TRUE
+# )
+# FetchContent_MakeAvailable(tracy)
 
 FetchContent_Declare(
     Catch2
@@ -90,7 +92,8 @@ add_executable(
 )
 
 target_include_directories(run PRIVATE include)
-target_link_libraries(run PRIVATE re2 fmt range-v3 nlohmann_json::nlohmann_json sqlparser duckdb TracyClient)
+# target_link_libraries(run PRIVATE re2 fmt range-v3 nlohmann_json::nlohmann_json sqlparser duckdb TracyClient)
+target_link_libraries(run PRIVATE re2 fmt range-v3 nlohmann_json::nlohmann_json sqlparser duckdb)
 target_compile_definitions(run PRIVATE -D_CRT_SECURE_NO_WARNINGS)
 
 add_executable(
@@ -100,7 +103,7 @@ add_executable(
 )
 
 target_include_directories(build_database PRIVATE include)
-target_link_libraries(build_database PRIVATE fmt duckdb TracyClient)
+target_link_libraries(build_database PRIVATE fmt duckdb)
 target_compile_definitions(build_database PRIVATE -D_CRT_SECURE_NO_WARNINGS)
 
 add_executable(
@@ -113,5 +116,5 @@ add_executable(
 )
 
 target_include_directories(unit_tests PRIVATE include)
-target_link_libraries(unit_tests PRIVATE range-v3 fmt Catch2::Catch2WithMain duckdb TracyClient)
+target_link_libraries(unit_tests PRIVATE range-v3 fmt Catch2::Catch2WithMain duckdb)
 target_compile_definitions(unit_tests PRIVATE -D_CRT_SECURE_NO_WARNINGS)
