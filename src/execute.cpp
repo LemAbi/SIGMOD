@@ -98,6 +98,9 @@ void BuildHashTbl(SensibleColumnarTable&        input_tbl,
                             InsertToHashmap<T>(tbl, data[processed++], id);
                         }
                         id++;
+						if (processed >= page_info.non_null_in_page) {
+							break;
+						}
                     }
                 }
                 cur_bitmap_id += 1;
