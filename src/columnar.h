@@ -464,21 +464,18 @@ static void* GetValueClmn(size_t record_id,
         TrackedPage&   page      = clm.pages[i];
         PageDescriptor page_info = page.page_info;
         size_t         rows_in_page;
-        if (clm.type == DataType::VARCHAR) {
-            switch (page_info.type) {
-            case PageType::Regular: {
-                rows_in_page = page_info.regular.rows_in_page;
-                break;
-            };
-            case PageType::LargeStrFirst: {
-                rows_in_page = 1;
-            };
-            case PageType::LargeStrSubsequent: {
-                rows_in_page = 0;
-            };
-            }
-        } else {
+        switch (page_info.type) {
+        case PageType::Regular: {
             rows_in_page = page_info.regular.rows_in_page;
+            break;
+        };
+        case PageType::LargeStrFirst: {
+            rows_in_page = 1;
+            break;
+        };
+        case PageType::LargeStrSubsequent: {
+            continue;
+        };
         }
         size_t next_row_cnt = row_cnt + rows_in_page;
         if (record_id < next_row_cnt) {
