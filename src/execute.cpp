@@ -658,19 +658,24 @@ SensibleColumnarTable execute_scan(const Plan&       plan,
     auto   table_id   = scan.base_table_id;
     auto&  input      = plan.inputs[table_id];
     size_t record_cnt = input.num_rows;
-    size_t column_cnt = 0;
+    size_t column_cnt = output_attrs.size();
     for (size_t i = 0; i < output_attrs.size(); i += 1) {
-        if (std::get<0>(output_attrs[i]) < input.columns.size()) {
-            column_cnt++;
-        }
+		assert(std::get<0>(output_attrs[i]) < input.columns.size());
     }
 
     SensibleColumnarTable result;
     result.num_rows = record_cnt;
     result.columns.reserve(column_cnt);
-    for (size_t i = 0; i < column_cnt; i += 1) {
+    for (size_t i = 0; i < output_attrs.size(); i += 1) {
         size_t select_col_id = std::get<0>(output_attrs[i]);
-        result.columns.emplace_back(input.columns[select_col_id].type);
+        result.columns.emplace_back(std::get<1>(output_attrs[i]));
+    }
+	if (record_cnt == 0) {
+		return result;
+	}
+
+    for (size_t i = 0; i < output_attrs.size(); i += 1) {
+        size_t select_col_id = std::get<0>(output_attrs[i]);
         size_t page_cnt = input.columns[select_col_id].pages.size();
         for (size_t j = 0; j < page_cnt; j += 1) {
             result.columns[i].AddInputPage(input.columns[select_col_id].pages[j]);
