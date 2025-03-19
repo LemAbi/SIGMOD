@@ -76,9 +76,8 @@ struct PageDescriptor {
         switch (type) {
         case PageType::Regular:
             return &(reinterpret_cast<uint8_t*>(page)[PAGE_SIZE - regular.bitmap_size]);
-        case PageType::LargeStrFirst: return &(reinterpret_cast<uint8_t*>(page)[PAGE_SIZE - 1]);
-        case PageType::LargeStrSubsequent:
-            return &(reinterpret_cast<uint8_t*>(page)[PAGE_SIZE - 1]);
+        case PageType::LargeStrFirst:      return nullptr;
+        case PageType::LargeStrSubsequent: return nullptr;
         }
         return nullptr; // unreachable - cpp sucks
     }
@@ -151,12 +150,11 @@ struct SensibleColumn {
 
     void AddLargeStrPage(uint16_t str_len, bool is_first) {
         // ZoneScoped;
-        Page*     page         = new Page;
-        uint16_t* page_u16     = reinterpret_cast<uint16_t*>(page);
-        uint8_t*  page_u8      = reinterpret_cast<uint8_t*>(page);
-        page_u16[0]            = is_first_big_str_page;
-        page_u16[1]            = str_len;
-        page_u8[PAGE_SIZE - 1] = 1u;
+        Page*     page     = new Page;
+        uint16_t* page_u16 = reinterpret_cast<uint16_t*>(page);
+        uint8_t*  page_u8  = reinterpret_cast<uint8_t*>(page);
+        page_u16[0]        = is_first ? is_first_big_str_page : is_subsequent_big_str_page;
+        page_u16[1]        = str_len;
         pages.push_back({
             page,
             {{str_len}, is_first ? PageType::LargeStrFirst : PageType::LargeStrSubsequent},
@@ -266,8 +264,8 @@ static void AppendLargStr(char* value, size_t large_str_len, SensibleColumn& clm
     bool   is_first       = true;
     size_t consumed_bytes = 0;
     while (consumed_bytes < large_str_len) {
-        uint16_t bytes_for_this_page = (large_str_len - consumed_bytes) > (PAGE_SIZE - 7)
-                                         ? (PAGE_SIZE - 7)
+        uint16_t bytes_for_this_page = (large_str_len - consumed_bytes) > MAX_PAGE_BIG_STR_SIZE
+                                         ? MAX_PAGE_BIG_STR_SIZE
                                          : large_str_len - consumed_bytes;
         clm.AddLargeStrPage(bytes_for_this_page, is_first);
         is_first = false;
@@ -282,7 +280,7 @@ static void AppendLargStr(char* value, size_t large_str_len, SensibleColumn& clm
 
 static void AppendStr(void* value, size_t str_len, SensibleColumn& clm) {
     // ZoneScoped;
-    if (str_len > (PAGE_SIZE - 7)) {
+    if (str_len > (MAX_PAGE_REGULAR_STR_SIZE)) {
         AppendLargStr((char*)value, str_len, clm);
         return;
     }
@@ -499,7 +497,8 @@ static void* GetValueClmn(size_t record_id,
 
 static char* ConcatLargeString(size_t start_page_id, SensibleColumn& clm) {
     // ZoneScoped;
-    size_t total_len = PAGE_SIZE - 7;
+    size_t initial_len = reinterpret_cast<uint16_t*>(clm.pages[start_page_id].page)[1];
+    size_t total_len   = initial_len;
     for (size_t i = start_page_id + 1; i < clm.pages.size(); i += 1) {
         uint16_t* u16_p = reinterpret_cast<uint16_t*>(clm.pages[i].page);
         if (u16_p[0] == is_subsequent_big_str_page) {
@@ -510,8 +509,8 @@ static char* ConcatLargeString(size_t start_page_id, SensibleColumn& clm) {
     }
     char* result = reinterpret_cast<char*>(malloc(total_len + 1));
 
-    memcpy(result, &(reinterpret_cast<char*>(clm.pages[start_page_id].page)[4]), PAGE_SIZE - 7);
-    size_t copied = PAGE_SIZE - 7;
+    memcpy(result, &(reinterpret_cast<char*>(clm.pages[start_page_id].page)[4]), initial_len);
+    size_t copied = initial_len;
     for (size_t i = start_page_id + 1; i < clm.pages.size(); i += 1) {
         uint16_t* u16_p = reinterpret_cast<uint16_t*>(clm.pages[i].page);
         if (u16_p[0] == is_subsequent_big_str_page) {
@@ -529,6 +528,7 @@ static char* ConcatLargeString(size_t start_page_id, SensibleColumn& clm) {
 
 static void PrintRow(SensibleColumnarTable& tbl, size_t row_id) {
     size_t num_clmns = tbl.columns.size();
+    std::cout << "Row id: " << row_id << " ";
     for (size_t j = 0; j < num_clmns; j += 1) {
         bool   is_large_str                 = false;
         size_t page_id_large_str_or_str_len = 0;
@@ -591,4 +591,11 @@ static void PrintTblStats(SensibleColumnarTable& tbl) {
         PrintClmStats(tbl.columns[i]);
     }
     std::cout << std::endl;
+}
+
+static void PrintOutAttr(const std::vector<std::tuple<size_t, DataType>>& attrs) {
+    for (size_t i = 0; i < attrs.size(); i += 1) {
+        std::cout << "Attribute i: " << i << " src_id: " << std::get<0>(attrs[i])
+                  << " DataType: " << DtToString(std::get<1>(attrs[i])) << std::endl;
+    }
 }

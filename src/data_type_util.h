@@ -1,10 +1,14 @@
 #pragma once
 
+#include "plan.h"
 #include <attribute.h>
 
 #include <cassert>
 #include <cstdint>
 #include <iostream>
+
+static const uint16_t MAX_PAGE_REGULAR_STR_SIZE = PAGE_SIZE - 7;
+static const uint16_t MAX_PAGE_BIG_STR_SIZE = PAGE_SIZE - 4;
 
 template <typename T>
 inline uint16_t AlingDTOffset() {

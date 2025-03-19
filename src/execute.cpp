@@ -83,7 +83,8 @@ void BuildHashTbl(SensibleColumnarTable&        input_tbl,
             while (processed < page_info.non_null_in_page) {
                 // NOTE: testing at larger than byte granularity could be faster overall
                 // (e.g. 512/256bit)
-                if (bitmap_begin[cur_bitmap_id] == u8_max) {
+                if (bitmap_begin[cur_bitmap_id] == u8_max
+                    && (page_info.non_null_in_page - processed >= 8)) {
                     // Full byte not null
                     for (size_t i = 0; i < 8; i += 1) {
                         InsertToHashmap<T>(tbl, data[processed++], id);
@@ -118,13 +119,13 @@ void BuildHashTblStr(SensibleColumnarTable&               input_tbl,
     size_t          page_cnt            = clm_to_hash.pages.size();
     size_t          items_in_prev_pages = 0;
     for (size_t i = 0; i < page_cnt; i += 1) { // TODO: do the parallelisation here
-        Page*          cur_page     = clm_to_hash.pages[i].page;
-        PageDescriptor page_info_   = clm_to_hash.pages[i].page_info;
-        uint8_t*       bitmap_begin = page_info_.BitMapBegin(cur_page);
-        size_t         id           = items_in_prev_pages;
+        Page*          cur_page   = clm_to_hash.pages[i].page;
+        PageDescriptor page_info_ = clm_to_hash.pages[i].page_info;
+        size_t         id         = items_in_prev_pages;
 
         switch (page_info_.type) {
         case PageType::Regular: {
+            uint8_t*              bitmap_begin      = page_info_.BitMapBegin(cur_page);
             RegularPageDescriptor page_info         = page_info_.regular;
             uint16_t              processed         = 0;
             uint16_t              cur_bitmap_id     = 0;
@@ -144,7 +145,8 @@ void BuildHashTblStr(SensibleColumnarTable&               input_tbl,
                 while (processed < page_info.non_null_in_page) {
                     // NOTE: testing at larger than byte granularity could be faster overall
                     // (e.g. 512/256bit)
-                    if (bitmap_begin[cur_bitmap_id] == u8_max) {
+                    if (bitmap_begin[cur_bitmap_id] == u8_max
+                        && (page_info.non_null_in_page - processed >= 8)) {
                         // Full byte not null
                         for (size_t i = 0; i < 8; i += 1) {
                             InsertStrToHashmap(tbl,
@@ -391,7 +393,9 @@ void Probe(SensibleColumnarTable&               tbl_l,
             }
         } else {
             while (curr_non_null_id < page_info.non_null_in_page) {
-                if (bitmap_begin[cur_bitmap_id] == u8_max) { // Full byte not null
+                if (bitmap_begin[cur_bitmap_id] == u8_max
+                    && (page_info.non_null_in_page - curr_non_null_id
+                        >= 8)) { // Full byte not null
                     for (size_t j = 0; j < 8; j += 1) {
                         T& key = data[curr_non_null_id++];
                         ProbeAndCollect(tbl,
@@ -454,13 +458,13 @@ void ProbeStr(SensibleColumnarTable&                      tbl_l,
     size_t          page_cnt     = clm_to_check.pages.size();
     size_t          items_handled_in_prev_pages = 0;
     for (size_t i = 0; i < page_cnt; i += 1) { // TODO: do the parallelisation here
-        Page*           cur_page     = clm_to_check.pages[i].page;
-        PageDescriptor& page_info_   = clm_to_check.pages[i].page_info;
-        uint8_t*        bitmap_begin = page_info_.BitMapBegin(cur_page);
-        size_t          curr_id      = items_handled_in_prev_pages;
+        Page*           cur_page   = clm_to_check.pages[i].page;
+        PageDescriptor& page_info_ = clm_to_check.pages[i].page_info;
+        size_t          curr_id    = items_handled_in_prev_pages;
 
         switch (page_info_.type) {
         case PageType::Regular: {
+            uint8_t*               bitmap_begin      = page_info_.BitMapBegin(cur_page);
             RegularPageDescriptor& page_info         = page_info_.regular;
             uint16_t               curr_non_null_id  = 0;
             uint16_t               cur_bitmap_id     = 0;
@@ -483,7 +487,8 @@ void ProbeStr(SensibleColumnarTable&                      tbl_l,
                 }
             } else {
                 while (curr_non_null_id < page_info.non_null_in_page) {
-                    if (bitmap_begin[cur_bitmap_id] == u8_max) {
+                    if (bitmap_begin[cur_bitmap_id] == u8_max
+                        && (page_info.non_null_in_page - curr_non_null_id >= 8)) {
                         // Full byte not null
                         for (size_t j = 0; j < 8; j += 1) {
                             ProbeAndCollectStr(tbl,
@@ -604,14 +609,27 @@ SensibleColumnarTable execute_hash_join(const Plan&  plan,
     const JoinNode&                                  join,
     const std::vector<std::tuple<size_t, DataType>>& output_attrs) {
     // ZoneScoped;
-    auto                  left_idx    = join.left;
-    auto                  right_idx   = join.right;
-    auto&                 left_node   = plan.nodes[left_idx];
-    auto&                 right_node  = plan.nodes[right_idx];
-    auto&                 left_types  = left_node.output_attrs;
-    auto&                 right_types = right_node.output_attrs;
-    auto                  left        = execute_impl(plan, left_idx);
-    auto                  right       = execute_impl(plan, right_idx);
+    auto  left_idx    = join.left;
+    auto  right_idx   = join.right;
+    auto& left_node   = plan.nodes[left_idx];
+    auto& right_node  = plan.nodes[right_idx];
+    auto& left_types  = left_node.output_attrs;
+    auto& right_types = right_node.output_attrs;
+    auto  left        = execute_impl(plan, left_idx);
+    auto  right       = execute_impl(plan, right_idx);
+
+    for (size_t i = 0; i < output_attrs.size(); i += 1) {
+        size_t   src_id          = std::get<0>(output_attrs[i]);
+        DataType result_col_type = std::get<1>(output_attrs[i]);
+        DataType tbl_col_type    = src_id < left.columns.size()
+                                     ? left.columns[src_id].type
+                                     : right.columns[src_id - left.columns.size()].type;
+        // assert(result_col_type == tbl_col_type);
+        if (result_col_type != tbl_col_type) {
+            std::abort();
+        }
+    }
+
     SensibleColumnarTable results;
     results.num_rows = 0;
     for (size_t i = 0; i < output_attrs.size(); i += 1) {
@@ -660,7 +678,10 @@ SensibleColumnarTable execute_scan(const Plan&       plan,
     size_t record_cnt = input.num_rows;
     size_t column_cnt = output_attrs.size();
     for (size_t i = 0; i < output_attrs.size(); i += 1) {
-		assert(std::get<0>(output_attrs[i]) < input.columns.size());
+        // assert(std::get<0>(output_attrs[i]) < input.columns.size());
+        if (std::get<0>(output_attrs[i]) >= input.columns.size()) {
+			std::abort();
+		}
     }
 
     SensibleColumnarTable result;
@@ -670,13 +691,17 @@ SensibleColumnarTable execute_scan(const Plan&       plan,
         size_t select_col_id = std::get<0>(output_attrs[i]);
         result.columns.emplace_back(std::get<1>(output_attrs[i]));
     }
-	if (record_cnt == 0) {
-		return result;
-	}
+    if (record_cnt == 0) {
+        return result;
+    }
 
     for (size_t i = 0; i < output_attrs.size(); i += 1) {
         size_t select_col_id = std::get<0>(output_attrs[i]);
-        size_t page_cnt = input.columns[select_col_id].pages.size();
+        size_t page_cnt      = input.columns[select_col_id].pages.size();
+        // assert(std::get<1>(output_attrs[i]) == input.columns[select_col_id].type);
+        if (std::get<1>(output_attrs[i]) != input.columns[select_col_id].type) {
+            std::abort();
+        }
         for (size_t j = 0; j < page_cnt; j += 1) {
             result.columns[i].AddInputPage(input.columns[select_col_id].pages[j]);
         }
