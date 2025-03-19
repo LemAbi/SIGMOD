@@ -420,14 +420,21 @@ static void* GetValueClmnPage(size_t page_record_id,
     if (page_info.regular.rows_in_page == page_info.regular.non_null_in_page) {
         non_null_id = page_record_id;
     } else {
-        size_t   current_non_null = 0;
-        size_t   current_checked  = 0;
-        uint8_t* bitmap           = page_info.BitMapBegin(page);
+        uint8_t* bitmap = BitMapBegin(page, page_info.regular.bitmap_size);
+
+        uint16_t byte_id = (page_record_id & ~bottom_three_bits_mask) >> 3;
+        uint8_t  bit_id  = page_record_id & bottom_three_bits_mask;
+        if ((bitmap[byte_id] & (1 << bit_id)) == 0) {
+            return nullptr;
+        }
+
+        size_t current_non_null = 0;
+        size_t current_checked  = 0;
         while (current_checked < page_record_id) {
             // NOTE: popcnt would be nice here but c++ sucks :) (i.e. it is C++ >= 20)
             // TODO: could still do blocked testing here
-            uint16_t byte_id = (current_checked & ~bottom_three_bits_mask) >> 3;
-            uint8_t  bit_id  = current_checked & bottom_three_bits_mask;
+            byte_id = (current_checked & ~bottom_three_bits_mask) >> 3;
+            bit_id  = current_checked & bottom_three_bits_mask;
             if ((bitmap[byte_id] & (1 << bit_id)) != 0) {
                 current_non_null++;
             }
@@ -490,7 +497,8 @@ static void* GetValueClmn(size_t record_id,
         }
         row_cnt = next_row_cnt;
     }
-    return nullptr; // unreachable
+    std::abort(); // unreachable
+    // return nullptr; // unreachable
 }
 
 // Debug area:
@@ -542,11 +550,15 @@ static void PrintRow(SensibleColumnarTable& tbl, size_t row_id) {
                 PrintVal(value, tbl.columns[j].type);
                 free(value);
             } else {
-                char* tmp_str = (char*)malloc(page_id_large_str_or_str_len + 1);
-                memcpy(tmp_str, value, page_id_large_str_or_str_len);
-                tmp_str[page_id_large_str_or_str_len] = '\0';
-                std::cout << tmp_str << "\t";
-                free(tmp_str);
+                if (value == nullptr) {
+                    std::cout << "Null\t";
+                } else {
+                    char* tmp_str = (char*)malloc(page_id_large_str_or_str_len + 1);
+                    memcpy(tmp_str, value, page_id_large_str_or_str_len);
+                    tmp_str[page_id_large_str_or_str_len] = '\0';
+                    std::cout << tmp_str << "\t";
+                    free(tmp_str);
+                }
             }
         }
     }

@@ -220,34 +220,35 @@ void CollectRecord(SensibleColumnarTable&            tbl_l,
             &is_large_str,
             &page_id_of_large_str_or_str_len);
 
-        if (!is_large_str) {
-            if (attr == nullptr) {
-                AppendNull(results.columns[i]);
-            } else {
+        if (attr != nullptr) {
+            if (!is_large_str) {
                 if (tbl_to_use.columns[col_id_to_use].type == DataType::VARCHAR) {
                     AppendStr(attr, page_id_of_large_str_or_str_len, results.columns[i]);
                 } else {
                     AppendAttr(attr, results.columns[i]);
                 }
-            }
-        } else {
-            // TODO: this copy could be elided see comment in execute_hash_join()
-            results.columns[i].AddPageCopy(
-                tbl_to_use.columns[col_id_to_use].pages[page_id_of_large_str_or_str_len].page);
+            } else {
+                // TODO: this copy could be elided see comment in execute_hash_join()
+                results.columns[i].AddPageCopy(tbl_to_use.columns[col_id_to_use]
+                        .pages[page_id_of_large_str_or_str_len]
+                        .page);
 
-            for (size_t j = page_id_of_large_str_or_str_len + 1;
-                j < tbl_to_use.columns[col_id_to_use].pages.size();
-                j += 1) {
-                uint16_t* u16_p = reinterpret_cast<uint16_t*>(
-                    tbl_to_use.columns[col_id_to_use].pages[j].page);
-                if (u16_p[0] == is_subsequent_big_str_page) {
-                    // TODO: this copy could be elided see comment in execute_hash_join()
-                    results.columns[i].AddPageCopy(
+                for (size_t j = page_id_of_large_str_or_str_len + 1;
+                    j < tbl_to_use.columns[col_id_to_use].pages.size();
+                    j += 1) {
+                    uint16_t* u16_p = reinterpret_cast<uint16_t*>(
                         tbl_to_use.columns[col_id_to_use].pages[j].page);
-                } else {
-                    break;
+                    if (u16_p[0] == is_subsequent_big_str_page) {
+                        // TODO: this copy could be elided see comment in execute_hash_join()
+                        results.columns[i].AddPageCopy(
+                            tbl_to_use.columns[col_id_to_use].pages[j].page);
+                    } else {
+                        break;
+                    }
                 }
             }
+        } else {
+            AppendNull(results.columns[i]);
         }
     }
     results.num_rows++;
@@ -265,6 +266,10 @@ void ValidateJoinMatch(size_t l_col_id,
     size_t dummy_id     = 0;
     T* val_l = (T*)GetValueClmn(l_row_id, tbl_l.columns[l_col_id], &is_large_str, &dummy_id);
     T* val_r = (T*)GetValueClmn(r_row_id, tbl_r.columns[r_col_id], &is_large_str, &dummy_id);
+    if (val_l == nullptr || val_r == nullptr) {
+        std::cout << "Match Validation failed. key: " << key << std::endl;
+        std::abort();
+    }
     if (*val_l != key || *val_r != key) {
         std::cout << "Match Validation failed. key: " << key << " l " << *val_l << " r "
                   << *val_r << std::endl;
