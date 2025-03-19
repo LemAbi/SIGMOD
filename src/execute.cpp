@@ -677,20 +677,20 @@ SensibleColumnarTable execute_scan(const Plan&       plan,
     auto&  input      = plan.inputs[table_id];
     size_t record_cnt = input.num_rows;
     size_t column_cnt = output_attrs.size();
-    for (size_t i = 0; i < output_attrs.size(); i += 1) {
-        // assert(std::get<0>(output_attrs[i]) < input.columns.size());
-        if (std::get<0>(output_attrs[i]) >= input.columns.size()) {
-			std::abort();
-		}
-    }
 
     SensibleColumnarTable result;
     result.num_rows = record_cnt;
     result.columns.reserve(column_cnt);
     for (size_t i = 0; i < output_attrs.size(); i += 1) {
-        size_t select_col_id = std::get<0>(output_attrs[i]);
         result.columns.emplace_back(std::get<1>(output_attrs[i]));
     }
+
+    for (size_t i = 0; i < output_attrs.size(); i += 1) {
+        if (std::get<0>(output_attrs[i]) >= input.columns.size()) {
+			return result;
+        }
+    }
+
     if (record_cnt == 0) {
         return result;
     }
