@@ -1,3 +1,4 @@
+#include <atomic>
 #include <attribute.h>
 #include <plan.h>
 #include <table.h>
@@ -5,6 +6,7 @@
 // TODO: Remove tray before submission
 // #include "../build/_deps/tracy-src/public/tracy/Tracy.hpp"
 #include "columnar.h"
+#include "probe.h"
 #include "thread_pool.h"
 
 #include <cassert>
@@ -18,7 +20,8 @@
 #include <vector>
 
 namespace Contest {
-static constexpr uint8_t u8_max = 0xffu;
+static constexpr uint64_t PARALLEL_PROBE_THRESHOLD             = 1;
+static constexpr uint64_t PARALLEL_PROBE_MAX_PAGES_PER_TASKLET = 64;
 
 SensibleColumnarTable execute_impl(const Plan& plan, size_t node_idx);
 
@@ -66,25 +69,25 @@ void BuildHashTbl(SensibleColumnarTable&        input_tbl,
     size_t          items_in_prev_pages = 0;
     for (size_t i = 0; i < page_cnt; i += 1) { // TODO: do the parallelisation here
         Page*                 cur_page     = clm_to_hash.pages[i].page;
-        PageDescriptor        page_info_   = clm_to_hash.pages[i].page_info;
-        RegularPageDescriptor page_info    = clm_to_hash.pages[i].page_info.regular;
+        PageDescriptor        page_info    = clm_to_hash.pages[i].page_info;
+        RegularPageDescriptor regular_info = clm_to_hash.pages[i].page_info.regular;
         T*                    data         = DataBegin<T>(cur_page);
-        uint8_t*              bitmap_begin = page_info_.BitMapBegin(cur_page);
+        uint8_t*              bitmap_begin = BitMapBegin(cur_page, &regular_info);
         size_t                id           = items_in_prev_pages;
 
         uint16_t processed     = 0;
         uint16_t cur_bitmap_id = 0;
-        if (page_info.non_null_in_page == page_info.rows_in_page) {
-            for (size_t j = 0; j < page_info.rows_in_page; j += 1) {
+        if (regular_info.non_null_in_page == regular_info.rows_in_page) {
+            for (size_t j = 0; j < regular_info.rows_in_page; j += 1) {
                 InsertToHashmap<T>(tbl, data[processed++], id);
                 id++;
             }
         } else {
-            while (processed < page_info.non_null_in_page) {
+            while (processed < regular_info.non_null_in_page) {
                 // NOTE: testing at larger than byte granularity could be faster overall
                 // (e.g. 512/256bit)
                 if (bitmap_begin[cur_bitmap_id] == u8_max
-                    && (page_info.non_null_in_page - processed >= 8)) {
+                    && (regular_info.non_null_in_page - processed >= 8)) {
                     // Full byte not null
                     for (size_t i = 0; i < 8; i += 1) {
                         InsertToHashmap<T>(tbl, data[processed++], id);
@@ -99,7 +102,7 @@ void BuildHashTbl(SensibleColumnarTable&        input_tbl,
                             InsertToHashmap<T>(tbl, data[processed++], id);
                         }
                         id++;
-                        if (processed >= page_info.non_null_in_page) {
+                        if (processed >= regular_info.non_null_in_page) {
                             break;
                         }
                     }
@@ -107,7 +110,7 @@ void BuildHashTbl(SensibleColumnarTable&        input_tbl,
                 cur_bitmap_id += 1;
             }
         }
-        items_in_prev_pages += page_info.rows_in_page;
+        items_in_prev_pages += regular_info.rows_in_page;
     }
 }
 
@@ -119,20 +122,20 @@ void BuildHashTblStr(SensibleColumnarTable&               input_tbl,
     size_t          page_cnt            = clm_to_hash.pages.size();
     size_t          items_in_prev_pages = 0;
     for (size_t i = 0; i < page_cnt; i += 1) { // TODO: do the parallelisation here
-        Page*          cur_page   = clm_to_hash.pages[i].page;
-        PageDescriptor page_info_ = clm_to_hash.pages[i].page_info;
-        size_t         id         = items_in_prev_pages;
+        Page*          cur_page  = clm_to_hash.pages[i].page;
+        PageDescriptor page_info = clm_to_hash.pages[i].page_info;
+        size_t         id        = items_in_prev_pages;
 
-        switch (page_info_.type) {
+        switch (page_info.type) {
         case PageType::Regular: {
-            uint8_t*              bitmap_begin      = page_info_.BitMapBegin(cur_page);
-            RegularPageDescriptor page_info         = page_info_.regular;
+            RegularPageDescriptor regular_info      = page_info.regular;
+            uint8_t*              bitmap_begin      = BitMapBegin(cur_page, &regular_info);
             uint16_t              processed         = 0;
             uint16_t              cur_bitmap_id     = 0;
-            uint16_t              str_base_offset   = page_info.non_null_in_page * 2 + 4;
+            uint16_t              str_base_offset   = regular_info.non_null_in_page * 2 + 4;
             uint16_t              current_str_begin = str_base_offset;
-            if (page_info.rows_in_page == page_info.non_null_in_page) {
-                for (size_t j = 0; j < page_info.rows_in_page; j += 1) {
+            if (regular_info.rows_in_page == regular_info.non_null_in_page) {
+                for (size_t j = 0; j < regular_info.rows_in_page; j += 1) {
                     InsertStrToHashmap(tbl,
                         id,
                         cur_page,
@@ -142,11 +145,11 @@ void BuildHashTblStr(SensibleColumnarTable&               input_tbl,
                     id++;
                 }
             } else {
-                while (processed < page_info.non_null_in_page) {
+                while (processed < regular_info.non_null_in_page) {
                     // NOTE: testing at larger than byte granularity could be faster overall
                     // (e.g. 512/256bit)
                     if (bitmap_begin[cur_bitmap_id] == u8_max
-                        && (page_info.non_null_in_page - processed >= 8)) {
+                        && (regular_info.non_null_in_page - processed >= 8)) {
                         // Full byte not null
                         for (size_t i = 0; i < 8; i += 1) {
                             InsertStrToHashmap(tbl,
@@ -171,7 +174,7 @@ void BuildHashTblStr(SensibleColumnarTable&               input_tbl,
                                     str_base_offset);
                             }
                             id++;
-                            if (processed >= page_info.non_null_in_page) {
+                            if (processed >= regular_info.non_null_in_page) {
                                 break;
                             }
                         }
@@ -179,7 +182,7 @@ void BuildHashTblStr(SensibleColumnarTable&               input_tbl,
                     cur_bitmap_id += 1;
                 }
             }
-            items_in_prev_pages += page_info.rows_in_page;
+            items_in_prev_pages += regular_info.rows_in_page;
             break;
         };
         case PageType::LargeStrFirst: {
@@ -193,65 +196,6 @@ void BuildHashTblStr(SensibleColumnarTable&               input_tbl,
         case PageType::LargeStrSubsequent: break; // These have already been processed above
         }
     }
-}
-
-// TODO: this is not particularly efficient. We could instead collect all ids and then collect
-// the attr later column-wise
-void CollectRecord(SensibleColumnarTable&            tbl_l,
-    SensibleColumnarTable&                           tbl_r,
-    SensibleColumnarTable&                           results,
-    size_t                                           record_id_l,
-    size_t                                           record_id_r,
-    const std::vector<std::tuple<size_t, DataType>>& output_attrs) {
-    size_t attr_cnt   = output_attrs.size();
-    size_t attr_l_cnt = tbl_l.columns.size();
-    for (size_t i = 0; i < attr_cnt; i += 1) {
-        size_t col_id   = std::get<0>(output_attrs[i]);
-        size_t use_left = col_id < attr_l_cnt;
-
-        SensibleColumnarTable& tbl_to_use       = use_left ? tbl_l : tbl_r;
-        size_t                 col_id_to_use    = use_left ? col_id : col_id - attr_l_cnt;
-        size_t                 record_id_to_use = use_left ? record_id_l : record_id_r;
-
-        bool   is_large_str                    = false;
-        size_t page_id_of_large_str_or_str_len = 0;
-        void*  attr                            = GetValueClmn(record_id_to_use,
-            tbl_to_use.columns[col_id_to_use],
-            &is_large_str,
-            &page_id_of_large_str_or_str_len);
-
-        if (attr != nullptr) {
-            if (!is_large_str) {
-                if (tbl_to_use.columns[col_id_to_use].type == DataType::VARCHAR) {
-                    AppendStr(attr, page_id_of_large_str_or_str_len, results.columns[i]);
-                } else {
-                    AppendAttr(attr, results.columns[i]);
-                }
-            } else {
-                // TODO: this copy could be elided see comment in execute_hash_join()
-                results.columns[i].AddPageCopy(tbl_to_use.columns[col_id_to_use]
-                        .pages[page_id_of_large_str_or_str_len]
-                        .page);
-
-                for (size_t j = page_id_of_large_str_or_str_len + 1;
-                    j < tbl_to_use.columns[col_id_to_use].pages.size();
-                    j += 1) {
-                    uint16_t* u16_p = reinterpret_cast<uint16_t*>(
-                        tbl_to_use.columns[col_id_to_use].pages[j].page);
-                    if (u16_p[0] == is_subsequent_big_str_page) {
-                        // TODO: this copy could be elided see comment in execute_hash_join()
-                        results.columns[i].AddPageCopy(
-                            tbl_to_use.columns[col_id_to_use].pages[j].page);
-                    } else {
-                        break;
-                    }
-                }
-            }
-        } else {
-            AppendNull(results.columns[i]);
-        }
-    }
-    results.num_rows++;
 }
 
 template <typename T>
@@ -278,282 +222,244 @@ void ValidateJoinMatch(size_t l_col_id,
 }
 
 template <typename T>
-inline void ProbeAndCollect(std::unordered_map<T, std::vector<size_t>>& tbl,
-    T&                                                                  key,
-    SensibleColumnarTable&                                              tbl_l,
-    SensibleColumnarTable&                                              tbl_r,
-    SensibleColumnarTable&                                              results,
-    bool                                                                hashed_is_left,
-    size_t                                                              curr_id,
-    const std::vector<std::tuple<size_t, DataType>>&                    output_attrs,
-    size_t                                                              l_col_id,
-    size_t                                                              r_col_id) {
-    if (auto itr = tbl.find(key); itr != tbl.end()) {
-        std::vector<size_t>& matches   = itr->second;
-        size_t               match_cnt = matches.size();
-        for (size_t k = 0; k < match_cnt; k += 1) {
-            if constexpr (!std::is_same<T, std::string>()) {
-                ValidateJoinMatch<T>(l_col_id,
-                    r_col_id,
-                    hashed_is_left ? matches[k] : curr_id,
-                    hashed_is_left ? curr_id : matches[k],
-                    tbl_l,
-                    tbl_r,
-                    key);
-            }
-            CollectRecord(tbl_l,
-                tbl_r,
-                results,
-                hashed_is_left ? matches[k] : curr_id,
-                hashed_is_left ? curr_id : matches[k],
-                output_attrs);
-        }
-    }
-}
-
-inline void ProbeAndCollectStr(std::unordered_map<std::string, std::vector<size_t>>& tbl,
-    SensibleColumnarTable&                                                           tbl_l,
-    SensibleColumnarTable&                                                           tbl_r,
-    SensibleColumnarTable&                                                           results,
-    bool                                             hashed_is_left,
-    size_t                                           curr_id,
-    const std::vector<std::tuple<size_t, DataType>>& output_attrs,
-    void*                                            page,
-    uint16_t*                                        current_non_null,
-    uint16_t*                                        current_str_begin,
-    uint16_t                                         str_base_offset) {
-    uint8_t*  u8_p    = reinterpret_cast<uint8_t*>(page);
-    uint16_t* u16_p   = reinterpret_cast<uint16_t*>(page);
-    void*     str     = &u8_p[*current_str_begin];
-    uint16_t  str_end = u16_p[*current_non_null + 2] + str_base_offset;
-    uint16_t  str_len = str_end - *current_str_begin;
-
-    // TODO: I'm sure one of the 20 constructors could do this without this copy
-    char* tmp_str = (char*)malloc(str_len + 1);
-    memcpy(tmp_str, str, str_len);
-    tmp_str[str_len] = '\0';
-    std::string key(tmp_str);
-
-    if (auto itr = tbl.find(key); itr != tbl.end()) {
-        std::vector<size_t>& matches   = itr->second;
-        size_t               match_cnt = matches.size();
-        for (size_t k = 0; k < match_cnt; k += 1) {
-            CollectRecord(tbl_l,
-                tbl_r,
-                results,
-                hashed_is_left ? matches[k] : curr_id,
-                hashed_is_left ? curr_id : matches[k],
-                output_attrs);
-        }
-    }
-    free(tmp_str);
-
-    *current_str_begin  = str_end;
-    *current_non_null  += 1;
-}
-
-template <typename T>
-void Probe(SensibleColumnarTable&               tbl_l,
-    SensibleColumnarTable&                      tbl_r,
-    size_t                                      col_id_of_non_hashed_in,
-    size_t                                      l_col_id,
-    size_t                                      r_col_id,
-    std::unordered_map<T, std::vector<size_t>>& tbl,
-    // TODO: when para -> use one result table for each and then "merge" which is just
-    // collecting the pages per column in one result table i.e. no need to actually cpy
-    // smth between pages
+void SingleThreadedProbe(SensibleColumnarTable&      tbl_l,
+    SensibleColumnarTable&                           tbl_r,
+    size_t                                           col_id_of_non_hashed,
+    size_t                                           l_col_id,
+    size_t                                           r_col_id,
+    std::unordered_map<T, std::vector<size_t>>&      tbl,
     SensibleColumnarTable&                           results,
     const std::vector<std::tuple<size_t, DataType>>& output_attrs,
     bool                                             hashed_is_left) {
-    // ZoneScoped;
     SensibleColumnarTable& non_hashed_tbl = hashed_is_left ? tbl_r : tbl_l;
-    SensibleColumn&        clm_to_check   = non_hashed_tbl.columns[col_id_of_non_hashed_in];
+    SensibleColumn&        clm_to_check   = non_hashed_tbl.columns[col_id_of_non_hashed];
 
-    size_t page_cnt            = clm_to_check.pages.size();
-    size_t items_in_prev_pages = 0;
+    size_t page_cnt           = clm_to_check.pages.size();
+    size_t rows_in_prev_pages = 0;
     for (size_t i = 0; i < page_cnt; i += 1) { // TODO: do the parallelisation here
         Page*                  cur_page     = clm_to_check.pages[i].page;
-        PageDescriptor&        page_info_   = clm_to_check.pages[i].page_info;
-        RegularPageDescriptor& page_info    = page_info_.regular;
-        T*                     data         = DataBegin<T>(cur_page);
-        uint8_t*               bitmap_begin = page_info_.BitMapBegin(cur_page);
-        size_t                 curr_id      = items_in_prev_pages;
+        PageDescriptor&        page_info    = clm_to_check.pages[i].page_info;
+        RegularPageDescriptor& regular_info = page_info.regular;
 
-        uint16_t curr_non_null_id = 0;
-        uint16_t cur_bitmap_id    = 0;
-        if (page_info.rows_in_page == page_info.non_null_in_page) {
-            for (size_t j = 0; j < page_info.rows_in_page; j += 1) {
-                T& key = data[curr_non_null_id++];
-                ProbeAndCollect(tbl,
-                    key,
-                    tbl_l,
-                    tbl_r,
-                    results,
-                    hashed_is_left,
-                    curr_id,
-                    output_attrs,
-                    l_col_id,
-                    r_col_id);
-                curr_id++;
+        ProbePage<T, PROBEBATCH_SIZE>(&tbl_l,
+            &tbl_r,
+            &results,
+            &tbl,
+            col_id_of_non_hashed,
+            cur_page,
+            &page_info,
+            rows_in_prev_pages,
+            &output_attrs,
+            hashed_is_left);
+
+        rows_in_prev_pages += regular_info.rows_in_page;
+    }
+}
+
+// BUG: **IMPORTANT** **If** we join on str -> This must either weed out big str pages before or
+// we must switch to using page_ids instead
+void ParallelProbe(SensibleColumnarTable&            tbl_l,
+    SensibleColumnarTable&                           tbl_r,
+    size_t                                           col_id_of_non_hashed,
+    size_t                                           l_col_id,
+    size_t                                           r_col_id,
+    void*                                            tbl,
+    SensibleColumnarTable&                           results,
+    const std::vector<std::tuple<size_t, DataType>>& output_attrs,
+    bool                                             hashed_is_left,
+    ExecContext*                                     ctx) {
+    SensibleColumnarTable& non_hashed_tbl = hashed_is_left ? tbl_r : tbl_l;
+    SensibleColumn&        clm_to_check   = non_hashed_tbl.columns[col_id_of_non_hashed];
+    size_t                 page_cnt       = clm_to_check.pages.size();
+    uint32_t thread_cnt = ctx->worker.size() + 1; // this thread will also participate
+    std::atomic<uint64_t> finished_tasklets = 0;
+
+    // Prepare one results tbl for each worker including this thread (the one for this thread
+    // could be elided but w/e for now)
+    std::vector<SensibleColumnarTable> worker_results;
+    for (size_t i = 0; i < thread_cnt; i += 1) {
+        worker_results.push_back(SensibleColumnarTable());
+        for (size_t j = 0; j < output_attrs.size(); j += 1) {
+            worker_results.back().columns.emplace_back(std::get<1>(output_attrs[j]));
+        }
+    }
+
+    ctx->work_access_lck.lock();
+
+    // Prep Tasklets
+    size_t   rows_in_prev_pages = 0;
+    size_t   curr_page_id       = 0;
+    uint64_t tasklets_enqd      = 0;
+    while (curr_page_id < page_cnt) {
+        size_t remaining_pages  = page_cnt - curr_page_id;
+        size_t pages_per_thread = std::min(PARALLEL_PROBE_MAX_PAGES_PER_TASKLET,
+            ((static_cast<size_t>(
+                 static_cast<double>(remaining_pages) / static_cast<double>(thread_cnt)))
+                + 1));
+
+        for (size_t t_id = 0; t_id < thread_cnt; t_id += 1) {
+            size_t pages_for_this_thread = std::min(remaining_pages, pages_per_thread);
+
+            WorkItem tasklet;
+            tasklet.work_type                       = WorkItemType::Join_Probe;
+            tasklet.work_info.output_attrs          = &output_attrs;
+            tasklet.work_info.result                = &worker_results;
+            tasklet.work_info.in_left               = &tbl_l;
+            tasklet.work_info.in_right              = &tbl_r;
+            tasklet.work_info.hash_tbl              = &tbl;
+            tasklet.work_info.tasklet_done_ctr      = &finished_tasklets;
+            tasklet.work_info.join_col_id_left      = l_col_id;
+            tasklet.work_info.join_col_id_right     = r_col_id;
+            tasklet.work_info.hashed_in_is_left_tbl = hashed_is_left;
+
+            tasklet.work_info.our_pages = {};
+            tasklet.work_info.our_pages.reserve(pages_for_this_thread);
+            for (size_t i = 0; i < pages_per_thread; i += 1) {
+                Page*                  cur_page     = clm_to_check.pages[i].page;
+                PageDescriptor*        page_info    = &clm_to_check.pages[i].page_info;
+                RegularPageDescriptor& regular_info = page_info->regular;
+
+                // TODO: see note at fn top -> switch over type and page type and for varchar +
+                // big str page -> handle it here ourselfes and skip page
+                tasklet.work_info.our_pages.push_back(
+                    {cur_page, page_info, rows_in_prev_pages});
+                rows_in_prev_pages += regular_info.rows_in_page;
             }
-        } else {
-            while (curr_non_null_id < page_info.non_null_in_page) {
-                if (bitmap_begin[cur_bitmap_id] == u8_max
-                    && (page_info.non_null_in_page - curr_non_null_id
-                        >= 8)) { // Full byte not null
-                    for (size_t j = 0; j < 8; j += 1) {
-                        T& key = data[curr_non_null_id++];
-                        ProbeAndCollect(tbl,
-                            key,
-                            tbl_l,
-                            tbl_r,
-                            results,
-                            hashed_is_left,
-                            curr_id,
-                            output_attrs,
-                            l_col_id,
-                            r_col_id);
-                        curr_id++;
-                    }
-                } else {
-                    // Some not null
-                    uint8_t current_byte = bitmap_begin[cur_bitmap_id];
-                    for (uint8_t intra_bitmap_id  = 0; intra_bitmap_id < 8;
-                        intra_bitmap_id          += 1) {
-                        if ((current_byte & (1 << intra_bitmap_id)) != 0) {
-                            T& key = data[curr_non_null_id++];
-                            ProbeAndCollect(tbl,
-                                key,
-                                tbl_l,
-                                tbl_r,
-                                results,
-                                hashed_is_left,
-                                curr_id,
-                                output_attrs,
-                                l_col_id,
-                                r_col_id);
-                        }
-                        curr_id++;
-                        if (curr_non_null_id >= page_info.non_null_in_page) {
-                            break;
-                        }
-                    }
-                }
-                cur_bitmap_id += 1;
+            remaining_pages -= pages_for_this_thread;
+
+            ctx->work_stack.push_back(std::move(tasklet));
+            tasklets_enqd++;
+        }
+    }
+
+    // We have enqd all the tasks but still hold the lock
+    // -> barrier to ensure input tbls are synchronized + inc item count and unlock so other
+    // threads can start work
+    std::atomic_fetch_add_explicit(&ctx->work_item_count,
+        tasklets_enqd,
+        std::memory_order_relaxed);
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    ctx->work_access_lck.unlock();
+
+    // There is no reason this thread should sit idly by
+    while (std::atomic_load_explicit(&finished_tasklets, std::memory_order_relaxed)
+           < tasklets_enqd) {
+        ctx->work_access_lck.lock();
+        WorkItem allocated_work = ctx->work_stack.back();
+        ctx->work_stack.pop_back();
+        std::atomic_fetch_sub_explicit(&ctx->work_item_count, 1, std::memory_order_relaxed);
+        ctx->work_access_lck.unlock();
+
+        ExecuteWork(allocated_work, thread_cnt - 1);
+        std::atomic_fetch_add_explicit(&finished_tasklets, 1, std::memory_order_relaxed);
+    }
+
+    // Sync output tbl results
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+
+    // Gather results together
+    for (size_t i = 0; i < thread_cnt; i += 1) {
+        results.num_rows += worker_results[i].num_rows;
+    }
+
+    for (size_t c_id = 0; c_id < results.columns.size(); c_id += 1) {
+        size_t total_page_cnt = 0;
+        for (size_t i = 0; i < thread_cnt; i += 1) {
+            total_page_cnt += worker_results[i].columns[c_id].pages.size();
+        }
+        results.columns[c_id].pages.resize(total_page_cnt);
+        for (size_t i = 0; i < thread_cnt; i += 1) {
+            size_t pages_from_this_thread = worker_results[i].columns[c_id].pages.size();
+            for (size_t p_id = 0; p_id < pages_from_this_thread; p_id += 1) {
+                results.columns[c_id].pages.push_back(
+                    worker_results[i].columns[c_id].pages[p_id]);
             }
         }
-        items_in_prev_pages += page_info.rows_in_page;
+    }
+}
+
+template <typename T>
+void Probe(SensibleColumnarTable&                    tbl_l,
+    SensibleColumnarTable&                           tbl_r,
+    size_t                                           col_id_of_non_hashed,
+    size_t                                           l_col_id,
+    size_t                                           r_col_id,
+    std::unordered_map<T, std::vector<size_t>>&      tbl,
+    SensibleColumnarTable&                           results,
+    const std::vector<std::tuple<size_t, DataType>>& output_attrs,
+    bool                                             hashed_is_left,
+    void*                                            ctx) {
+    // ZoneScoped;
+    SensibleColumnarTable& non_hashed_tbl = hashed_is_left ? tbl_r : tbl_l;
+    if (non_hashed_tbl.columns[col_id_of_non_hashed].pages.size() <= PARALLEL_PROBE_THRESHOLD) {
+        SingleThreadedProbe<T>(tbl_l,
+            tbl_r,
+            col_id_of_non_hashed,
+            l_col_id,
+            r_col_id,
+            tbl,
+            results,
+            output_attrs,
+            hashed_is_left);
+    } else {
+        ParallelProbe(tbl_l,
+            tbl_r,
+            col_id_of_non_hashed,
+            l_col_id,
+            r_col_id,
+            &tbl,
+            results,
+            output_attrs,
+            hashed_is_left,
+            static_cast<ExecContext*>(ctx));
     }
 }
 
 void ProbeStr(SensibleColumnarTable&                      tbl_l,
     SensibleColumnarTable&                                tbl_r,
-    size_t                                                col_id_of_non_hashed_in,
+    size_t                                                col_id_of_non_hashed,
     std::unordered_map<std::string, std::vector<size_t>>& tbl,
-    // TODO: when para -> use one result table for each and then "merge" which is just
-    // collecting the pages per column in one result table i.e. no need to actually cpy
-    // smth between pages
-    SensibleColumnarTable&                           results,
-    const std::vector<std::tuple<size_t, DataType>>& output_attrs,
-    bool                                             hashed_is_left) {
+    SensibleColumnarTable&                                results,
+    const std::vector<std::tuple<size_t, DataType>>&      output_attrs,
+    bool                                                  hashed_is_left) {
     // ZoneScoped;
     SensibleColumnarTable& non_hashed_tbl = hashed_is_left ? tbl_r : tbl_l;
 
-    SensibleColumn& clm_to_check = non_hashed_tbl.columns[col_id_of_non_hashed_in];
-    size_t          page_cnt     = clm_to_check.pages.size();
-    size_t          items_handled_in_prev_pages = 0;
-    for (size_t i = 0; i < page_cnt; i += 1) { // TODO: do the parallelisation here
-        Page*           cur_page   = clm_to_check.pages[i].page;
-        PageDescriptor& page_info_ = clm_to_check.pages[i].page_info;
-        size_t          curr_id    = items_handled_in_prev_pages;
-
-        switch (page_info_.type) {
+    SensibleColumn& clm_to_check       = non_hashed_tbl.columns[col_id_of_non_hashed];
+    size_t          page_cnt           = clm_to_check.pages.size();
+    size_t          rows_in_prev_pages = 0;
+    for (size_t i = 0; i < page_cnt; i += 1) {
+        Page*           cur_page  = clm_to_check.pages[i].page;
+        PageDescriptor& page_info = clm_to_check.pages[i].page_info;
+        size_t          curr_id   = rows_in_prev_pages;
+        switch (page_info.type) {
         case PageType::Regular: {
-            uint8_t*               bitmap_begin      = page_info_.BitMapBegin(cur_page);
-            RegularPageDescriptor& page_info         = page_info_.regular;
-            uint16_t               curr_non_null_id  = 0;
-            uint16_t               cur_bitmap_id     = 0;
-            uint16_t               str_base_offset   = page_info.non_null_in_page * 2 + 4;
-            uint16_t               current_str_begin = str_base_offset;
-            if (page_info.rows_in_page == page_info.non_null_in_page) {
-                for (size_t j = 0; j < page_info.rows_in_page; j += 1) {
-                    ProbeAndCollectStr(tbl,
-                        tbl_l,
-                        tbl_r,
-                        results,
-                        hashed_is_left,
-                        curr_id,
-                        output_attrs,
-                        cur_page,
-                        &curr_non_null_id,
-                        &current_str_begin,
-                        str_base_offset);
-                    curr_id++;
-                }
-            } else {
-                while (curr_non_null_id < page_info.non_null_in_page) {
-                    if (bitmap_begin[cur_bitmap_id] == u8_max
-                        && (page_info.non_null_in_page - curr_non_null_id >= 8)) {
-                        // Full byte not null
-                        for (size_t j = 0; j < 8; j += 1) {
-                            ProbeAndCollectStr(tbl,
-                                tbl_l,
-                                tbl_r,
-                                results,
-                                hashed_is_left,
-                                curr_id,
-                                output_attrs,
-                                cur_page,
-                                &curr_non_null_id,
-                                &current_str_begin,
-                                str_base_offset);
-                            curr_id++;
-                        }
-                    } else {
-                        // Some not null
-                        uint8_t current_byte = bitmap_begin[cur_bitmap_id];
-                        for (uint8_t intra_bitmap_id  = 0; intra_bitmap_id < 8;
-                            intra_bitmap_id          += 1) {
-                            if ((current_byte & (1 << intra_bitmap_id)) != 0) {
-                                ProbeAndCollectStr(tbl,
-                                    tbl_l,
-                                    tbl_r,
-                                    results,
-                                    hashed_is_left,
-                                    curr_id,
-                                    output_attrs,
-                                    cur_page,
-                                    &curr_non_null_id,
-                                    &current_str_begin,
-                                    str_base_offset);
-                            }
-                            curr_id++;
-                            if (curr_non_null_id >= page_info.non_null_in_page) {
-                                break;
-                            }
-                        }
-                    }
-                    cur_bitmap_id += 1;
-                }
-            }
-            items_handled_in_prev_pages += page_info.rows_in_page;
+            ProbePageStr<PROBEBATCH_SIZE>(&tbl_l,
+                &tbl_r,
+                &results,
+                &tbl,
+                col_id_of_non_hashed,
+                cur_page,
+                &page_info,
+                rows_in_prev_pages,
+                &output_attrs,
+                hashed_is_left);
+            rows_in_prev_pages += page_info.regular.rows_in_page;
             break;
         };
         case PageType::LargeStrFirst: {
             char*       long_str = ConcatLargeString(i, clm_to_check);
             std::string key(long_str);
-            ProbeAndCollect(tbl,
+            ProbeAndCollect(&tbl,
                 key,
-                tbl_l,
-                tbl_r,
-                results,
+                &tbl_l,
+                &tbl_r,
+                &results,
                 hashed_is_left,
                 curr_id,
-                output_attrs,
-                0,
-                0);
+                &output_attrs);
             free(long_str);
-            items_handled_in_prev_pages += 1;
+            rows_in_prev_pages += page_info.regular.rows_in_page;
             break;
         };
         case PageType::LargeStrSubsequent: break; // These have already been processed above
@@ -568,6 +474,7 @@ struct JoinAlgorithm {
     SensibleColumnarTable&                           results;
     size_t                                           left_col, right_col;
     const std::vector<std::tuple<size_t, DataType>>& output_attrs;
+    void*                                            ctx;
 
     template <class T>
     auto run() {
@@ -593,7 +500,8 @@ struct JoinAlgorithm {
                     hash_table,
                     results,
                     output_attrs,
-                    true);
+                    true,
+                    ctx);
             } else {
                 BuildHashTbl<T>(right, right_col, hash_table);
                 Probe<T>(left,
@@ -604,7 +512,8 @@ struct JoinAlgorithm {
                     hash_table,
                     results,
                     output_attrs,
-                    false);
+                    false,
+                    ctx);
             }
         }
     }
@@ -612,7 +521,8 @@ struct JoinAlgorithm {
 
 SensibleColumnarTable execute_hash_join(const Plan&  plan,
     const JoinNode&                                  join,
-    const std::vector<std::tuple<size_t, DataType>>& output_attrs) {
+    const std::vector<std::tuple<size_t, DataType>>& output_attrs,
+    void*                                            ctx) {
     // ZoneScoped;
     auto  left_idx    = join.left;
     auto  right_idx   = join.right;
@@ -650,7 +560,8 @@ SensibleColumnarTable execute_hash_join(const Plan&  plan,
         .results                             = results,
         .left_col                            = join.left_attr,
         .right_col                           = join.right_attr,
-        .output_attrs                        = output_attrs};
+        .output_attrs                        = output_attrs,
+        .ctx                                 = ctx};
     if (join.build_left) {
         switch (std::get<1>(left_types[join.left_attr])) {
         case DataType::INT32:   join_algorithm.run<int32_t>(); break;
@@ -692,7 +603,7 @@ SensibleColumnarTable execute_scan(const Plan&       plan,
 
     for (size_t i = 0; i < output_attrs.size(); i += 1) {
         if (std::get<0>(output_attrs[i]) >= input.columns.size()) {
-			return result;
+            return result;
         }
     }
 
@@ -714,14 +625,14 @@ SensibleColumnarTable execute_scan(const Plan&       plan,
     return result;
 }
 
-SensibleColumnarTable execute_impl(const Plan& plan, size_t node_idx) {
+SensibleColumnarTable execute_impl(const Plan& plan, size_t node_idx, void* ctx) {
     // ZoneScoped;
     auto& node = plan.nodes[node_idx];
     return std::visit(
         [&](const auto& value) {
             using T = std::decay_t<decltype(value)>;
             if constexpr (std::is_same_v<T, JoinNode>) {
-                return execute_hash_join(plan, value, node.output_attrs);
+                return execute_hash_join(plan, value, node.output_attrs, ctx);
             } else {
                 return execute_scan(plan, value, node.output_attrs);
             }
@@ -729,9 +640,9 @@ SensibleColumnarTable execute_impl(const Plan& plan, size_t node_idx) {
         node.data);
 }
 
-ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
+ColumnarTable execute(const Plan& plan, void* context) {
     // ZoneScoped;
-    auto          ret = execute_impl(plan, plan.root);
+    auto          ret = execute_impl(plan, plan.root, context);
     ColumnarTable result;
     result.num_rows   = ret.num_rows;
     size_t column_cnt = ret.columns.size();
@@ -773,14 +684,14 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
 
 void* build_context() {
     // ZoneScoped;
-    // return new ExecContext();
+    return new ExecContext();
     return nullptr;
 }
 
 void destroy_context(void* context) {
     // ZoneScoped;
-    // ExecContext* ctx = static_cast<ExecContext*>(context);
-    // delete ctx;
+    ExecContext* ctx = static_cast<ExecContext*>(context);
+    delete ctx;
 }
 
 } // namespace Contest

@@ -9,12 +9,15 @@
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <vector>
 
-static constexpr uint16_t bottom_three_bits_mask = 0b111u;
-
+static constexpr uint16_t bottom_three_bits_mask     = 0b111u;
 static constexpr uint16_t is_first_big_str_page      = 0xffffu;
 static constexpr uint16_t is_subsequent_big_str_page = 0xfffeu;
+static constexpr uint16_t PROBEBATCH_SIZE            = 64;
+static constexpr uint8_t  u8_max                     = std::numeric_limits<uint8_t>::max();
+static constexpr uint64_t u64_max                    = std::numeric_limits<uint64_t>::max();
 
 template <typename T>
 inline T* DataBegin(Page* page) {
@@ -71,17 +74,11 @@ struct PageDescriptor {
     };
 
     PageType type;
-
-    inline uint8_t* BitMapBegin(Page* page) {
-        switch (type) {
-        case PageType::Regular:
-            return &(reinterpret_cast<uint8_t*>(page)[PAGE_SIZE - regular.bitmap_size]);
-        case PageType::LargeStrFirst:      return nullptr;
-        case PageType::LargeStrSubsequent: return nullptr;
-        }
-        return nullptr; // unreachable - cpp sucks
-    }
 };
+
+static inline uint8_t* BitMapBegin(Page* page, RegularPageDescriptor* page_info) {
+    return &(reinterpret_cast<uint8_t*>(page)[PAGE_SIZE - page_info->bitmap_size]);
+}
 
 static PageDescriptor ParsePage(Page* page, DataType data_type) {
     PageDescriptor result;
@@ -500,6 +497,66 @@ static void* GetValueClmn(size_t record_id,
     std::abort(); // unreachable
     // return nullptr; // unreachable
 }
+
+// TODO: this is not particularly efficient. We could instead collect all ids and then collect
+// the attr later column-wise
+static void CollectRecord(SensibleColumnarTable*            tbl_l,
+    SensibleColumnarTable*                           tbl_r,
+    SensibleColumnarTable*                           results,
+    size_t                                           record_id_l,
+    size_t                                           record_id_r,
+    const std::vector<std::tuple<size_t, DataType>>* output_attrs) {
+    size_t attr_cnt   = output_attrs->size();
+    size_t attr_l_cnt = tbl_l->columns.size();
+    for (size_t i = 0; i < attr_cnt; i += 1) {
+        size_t col_id   = std::get<0>((*output_attrs)[i]);
+        size_t use_left = col_id < attr_l_cnt;
+
+        SensibleColumnarTable* tbl_to_use       = use_left ? tbl_l : tbl_r;
+        size_t                 col_id_to_use    = use_left ? col_id : col_id - attr_l_cnt;
+        size_t                 record_id_to_use = use_left ? record_id_l : record_id_r;
+
+        bool   is_large_str                    = false;
+        size_t page_id_of_large_str_or_str_len = 0;
+        void*  attr                            = GetValueClmn(record_id_to_use,
+            tbl_to_use->columns[col_id_to_use],
+            &is_large_str,
+            &page_id_of_large_str_or_str_len);
+
+        if (attr != nullptr) {
+            if (!is_large_str) {
+                if (tbl_to_use->columns[col_id_to_use].type == DataType::VARCHAR) {
+                    AppendStr(attr, page_id_of_large_str_or_str_len, results->columns[i]);
+                } else {
+                    AppendAttr(attr, results->columns[i]);
+                }
+            } else {
+                // TODO: this copy could be elided see comment in execute_hash_join()
+                results->columns[i].AddPageCopy(tbl_to_use->columns[col_id_to_use]
+                        .pages[page_id_of_large_str_or_str_len]
+                        .page);
+
+                for (size_t j = page_id_of_large_str_or_str_len + 1;
+                    j < tbl_to_use->columns[col_id_to_use].pages.size();
+                    j += 1) {
+                    uint16_t* u16_p = reinterpret_cast<uint16_t*>(
+                        tbl_to_use->columns[col_id_to_use].pages[j].page);
+                    if (u16_p[0] == is_subsequent_big_str_page) {
+                        // TODO: this copy could be elided see comment in execute_hash_join()
+                        results->columns[i].AddPageCopy(
+                            tbl_to_use->columns[col_id_to_use].pages[j].page);
+                    } else {
+                        break;
+                    }
+                }
+            }
+        } else {
+            AppendNull(results->columns[i]);
+        }
+    }
+    results->num_rows++;
+}
+
 
 // Debug area:
 
