@@ -224,11 +224,11 @@ void CollectRecord(SensibleColumnarTable&            tbl_l,
             if (attr == nullptr) {
                 AppendNull(results.columns[i]);
             } else {
-            }
-            if (tbl_to_use.columns[col_id_to_use].type == DataType::VARCHAR) {
-                AppendStr(attr, page_id_of_large_str_or_str_len, results.columns[i]);
-            } else {
-                AppendAttr(attr, results.columns[i]);
+                if (tbl_to_use.columns[col_id_to_use].type == DataType::VARCHAR) {
+                    AppendStr(attr, page_id_of_large_str_or_str_len, results.columns[i]);
+                } else {
+                    AppendAttr(attr, results.columns[i]);
+                }
             }
         } else {
             // TODO: this copy could be elided see comment in execute_hash_join()
