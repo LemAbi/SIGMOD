@@ -236,7 +236,7 @@ void AppendValue(T* value, SensibleColumn& clm) {
     page_u16[0]++;
     page_u16[1]++;
 
-    uint8_t* bitmap_start = BitMapBegin(page->page, page->page_info.regular);
+    uint8_t* bitmap_start = BitMapBegin(page->page, &page->page_info.regular);
     if (will_need_new_bitmap_byte) {
         AddByteToBitmap(&bitmap_start, &page->page_info.regular);
     }
@@ -331,7 +331,7 @@ static void AppendStr(void* value, size_t str_len, SensibleColumn& clm) {
     page_u16[0]++;
     page_u16[1]++;
 
-    uint8_t* bitmap_start = BitMapBegin(page->page, page->page_info.regular);
+    uint8_t* bitmap_start = BitMapBegin(page->page, &page->page_info.regular);
     if (will_need_new_bitmap_byte) {
         AddByteToBitmap(&bitmap_start, &page->page_info.regular);
     }
@@ -373,7 +373,7 @@ static void AppendNull(SensibleColumn& clm) {
     page_u16[0]++;
     page->page_info.regular.rows_in_page++;
 
-    uint8_t* bitmap_start = BitMapBegin(page->page, page->page_info.regular);
+    uint8_t* bitmap_start = BitMapBegin(page->page, &page->page_info.regular);
     if (will_need_new_bitmap_byte) {
         AddByteToBitmap(&bitmap_start, &page->page_info.regular);
     }
@@ -417,7 +417,7 @@ static void* GetValueClmnPage(size_t page_record_id,
     if (page_info.regular.rows_in_page == page_info.regular.non_null_in_page) {
         non_null_id = page_record_id;
     } else {
-        uint8_t* bitmap = BitMapBegin(page, page_info.regular);
+        uint8_t* bitmap = BitMapBegin(page, &page_info);
 
         uint16_t byte_id = (page_record_id & ~bottom_three_bits_mask) >> 3;
         uint8_t  bit_id  = page_record_id & bottom_three_bits_mask;
