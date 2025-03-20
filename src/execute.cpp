@@ -23,7 +23,7 @@ namespace Contest {
 static constexpr uint64_t PARALLEL_PROBE_THRESHOLD             = 2;
 static constexpr uint64_t PARALLEL_PROBE_MAX_PAGES_PER_TASKLET = 64;
 
-SensibleColumnarTable execute_impl(const Plan& plan, size_t node_idx);
+SensibleColumnarTable execute_impl(const Plan& plan, size_t node_idx, void* ctx);
 
 template <typename T>
 inline void
@@ -534,8 +534,8 @@ SensibleColumnarTable execute_hash_join(const Plan&  plan,
     auto& right_node  = plan.nodes[right_idx];
     auto& left_types  = left_node.output_attrs;
     auto& right_types = right_node.output_attrs;
-    auto  left        = execute_impl(plan, left_idx);
-    auto  right       = execute_impl(plan, right_idx);
+    auto  left        = execute_impl(plan, left_idx, ctx);
+    auto  right       = execute_impl(plan, right_idx, ctx);
 
     for (size_t i = 0; i < output_attrs.size(); i += 1) {
         size_t   src_id          = std::get<0>(output_attrs[i]);
