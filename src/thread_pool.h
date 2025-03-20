@@ -48,7 +48,7 @@ void ExecuteProbeTasklet(JoinProbeInfo& probe_info, uint32_t thread_id) {
     bool                   hash_is_left = probe_info.hashed_in_is_left_tbl;
     SensibleColumnarTable* tbl_l        = probe_info.in_left;
     SensibleColumnarTable* tbl_r        = probe_info.in_right;
-    SensibleColumnarTable* result       = &(*probe_info.result)[thread_id];
+    SensibleColumnarTable* result       = &((*probe_info.result)[thread_id]);
     const std::vector<std::tuple<size_t, DataType>>* output_attrs = probe_info.output_attrs;
     size_t                                           col_id_l     = probe_info.join_col_id_left;
     size_t                                           col_id_r = probe_info.join_col_id_right;

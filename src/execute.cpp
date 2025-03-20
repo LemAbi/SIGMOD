@@ -20,7 +20,7 @@
 #include <vector>
 
 namespace Contest {
-static constexpr uint64_t PARALLEL_PROBE_THRESHOLD             = 1;
+static constexpr uint64_t PARALLEL_PROBE_THRESHOLD             = 2;
 static constexpr uint64_t PARALLEL_PROBE_MAX_PAGES_PER_TASKLET = 64;
 
 SensibleColumnarTable execute_impl(const Plan& plan, size_t node_idx);
@@ -256,8 +256,9 @@ void SingleThreadedProbe(SensibleColumnarTable&      tbl_l,
     }
 }
 
-// BUG: **IMPORTANT** **If** we join on str -> This must either weed out big str pages before or
-// we must switch to using page_ids instead
+// TODO: **IMPORTANT** **If** we join on str -> This must either weed out big str pages before
+// or we must switch to using page_ids instead. This is currently addressed by not using the
+// parallel path for joins of strings
 void ParallelProbe(SensibleColumnarTable&            tbl_l,
     SensibleColumnarTable&                           tbl_r,
     size_t                                           col_id_of_non_hashed,
@@ -391,7 +392,10 @@ void Probe(SensibleColumnarTable&                    tbl_l,
     void*                                            ctx) {
     // ZoneScoped;
     SensibleColumnarTable& non_hashed_tbl = hashed_is_left ? tbl_r : tbl_l;
-    if (non_hashed_tbl.columns[col_id_of_non_hashed].pages.size() <= PARALLEL_PROBE_THRESHOLD) {
+    // TODO: switch to parallel probe also for str path - disabled here since we currently dont
+    // handle big str pages correctly - sec comment on paraprobe fn
+    if (non_hashed_tbl.columns[col_id_of_non_hashed].pages.size() < PARALLEL_PROBE_THRESHOLD
+        || tbl_l.columns[l_col_id].type == DataType::VARCHAR) {
         SingleThreadedProbe<T>(tbl_l,
             tbl_r,
             col_id_of_non_hashed,
