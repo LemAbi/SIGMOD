@@ -417,7 +417,7 @@ static void* GetValueClmnPage(size_t page_record_id,
     if (page_info.regular.rows_in_page == page_info.regular.non_null_in_page) {
         non_null_id = page_record_id;
     } else {
-        uint8_t* bitmap = BitMapBegin(page, &page_info);
+        uint8_t* bitmap = BitMapBegin(page, &page_info.regular);
 
         uint16_t byte_id = (page_record_id & ~bottom_three_bits_mask) >> 3;
         uint8_t  bit_id  = page_record_id & bottom_three_bits_mask;
