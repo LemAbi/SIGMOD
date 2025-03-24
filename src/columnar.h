@@ -531,10 +531,7 @@ static void CollectRecord(SensibleColumnarTable*            tbl_l,
                     AppendAttr(attr, results->columns[i]);
                 }
             } else {
-                // TODO: this copy could be elided see comment in execute_hash_join()
-                results->columns[i].AddPageCopy(tbl_to_use->columns[col_id_to_use]
-                        .pages[page_id_of_large_str_or_str_len]
-                        .page);
+				results->columns[i].AddInputPage(tbl_to_use->columns[col_id_to_use].pages[page_id_of_large_str_or_str_len].page);
 
                 for (size_t j = page_id_of_large_str_or_str_len + 1;
                     j < tbl_to_use->columns[col_id_to_use].pages.size();
@@ -542,8 +539,7 @@ static void CollectRecord(SensibleColumnarTable*            tbl_l,
                     uint16_t* u16_p = reinterpret_cast<uint16_t*>(
                         tbl_to_use->columns[col_id_to_use].pages[j].page);
                     if (u16_p[0] == is_subsequent_big_str_page) {
-                        // TODO: this copy could be elided see comment in execute_hash_join()
-                        results->columns[i].AddPageCopy(
+                        results->columns[i].AddInputPage(
                             tbl_to_use->columns[col_id_to_use].pages[j].page);
                     } else {
                         break;

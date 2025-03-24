@@ -67,7 +67,7 @@ void BuildHashTbl(SensibleColumnarTable&        input_tbl,
     SensibleColumn& clm_to_hash         = input_tbl.columns[col_id];
     size_t          page_cnt            = clm_to_hash.pages.size();
     size_t          items_in_prev_pages = 0;
-    for (size_t i = 0; i < page_cnt; i += 1) { // TODO: do the parallelisation here
+    for (size_t i = 0; i < page_cnt; i += 1) {
         Page*                 cur_page     = clm_to_hash.pages[i].page;
         PageDescriptor        page_info    = clm_to_hash.pages[i].page_info;
         RegularPageDescriptor regular_info = clm_to_hash.pages[i].page_info.regular;
@@ -121,7 +121,7 @@ void BuildHashTblStr(SensibleColumnarTable&               input_tbl,
     SensibleColumn& clm_to_hash         = input_tbl.columns[col_id];
     size_t          page_cnt            = clm_to_hash.pages.size();
     size_t          items_in_prev_pages = 0;
-    for (size_t i = 0; i < page_cnt; i += 1) { // TODO: do the parallelisation here
+    for (size_t i = 0; i < page_cnt; i += 1) {
         Page*          cur_page  = clm_to_hash.pages[i].page;
         PageDescriptor page_info = clm_to_hash.pages[i].page_info;
         size_t         id        = items_in_prev_pages;
@@ -236,7 +236,7 @@ void SingleThreadedProbe(SensibleColumnarTable&      tbl_l,
 
     size_t page_cnt           = clm_to_check.pages.size();
     size_t rows_in_prev_pages = 0;
-    for (size_t i = 0; i < page_cnt; i += 1) { // TODO: do the parallelisation here
+    for (size_t i = 0; i < page_cnt; i += 1) {
         Page*                  cur_page     = clm_to_check.pages[i].page;
         PageDescriptor&        page_info    = clm_to_check.pages[i].page_info;
         RegularPageDescriptor& regular_info = page_info.regular;
@@ -591,10 +591,6 @@ SensibleColumnarTable execute_hash_join(const Plan&  plan,
         case DataType::VARCHAR: join_algorithm.run<char*>(); break;
         }
     }
-
-    // TODO: left and right intermediates go out of scope here. If we want to do non-owning
-    // pages e.g. for large strings we would need to take ownership here.
-    // Input pages are handled in exectue() in the very end before returning.
 
     return results;
 }

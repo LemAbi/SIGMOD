@@ -174,7 +174,7 @@ inline void NonBatchProbeStr(uint16_t                     page_start_id,
     uint16_t*                                             curr_str_begin,
     uint16_t*                                             non_null_id,
     uint16_t                                              str_base_offset) {
-    uint16_t page_id  = page_start_id;
+    uint16_t page_id = page_start_id;
 
     for (uint16_t i = 0; i < to_test; i += 1) {
         uint16_t byte_id = (page_id & ~bottom_three_bits_mask) >> 3;
@@ -231,7 +231,7 @@ void ProbePage(SensibleColumnarTable*                tbl_l,
                 hashed_is_left,
                 global_id,
                 output_attrs);
-			global_id++;
+            global_id++;
         }
     } else {
         size_t   batch_cnt = total_cnt / batch_size;
