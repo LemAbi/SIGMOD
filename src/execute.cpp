@@ -394,29 +394,29 @@ void Probe(SensibleColumnarTable&                    tbl_l,
     SensibleColumnarTable& non_hashed_tbl = hashed_is_left ? tbl_r : tbl_l;
     // TODO: switch to parallel probe also for str path - disabled here since we currently dont
     // handle big str pages correctly - sec comment on paraprobe fn
-    if (non_hashed_tbl.columns[col_id_of_non_hashed].pages.size() < PARALLEL_PROBE_THRESHOLD
-        || tbl_l.columns[l_col_id].type == DataType::VARCHAR) {
-        SingleThreadedProbe<T>(tbl_l,
-            tbl_r,
-            col_id_of_non_hashed,
-            l_col_id,
-            r_col_id,
-            tbl,
-            results,
-            output_attrs,
-            hashed_is_left);
-    } else {
-        ParallelProbe(tbl_l,
-            tbl_r,
-            col_id_of_non_hashed,
-            l_col_id,
-            r_col_id,
-            &tbl,
-            results,
-            output_attrs,
-            hashed_is_left,
-            static_cast<ExecContext*>(ctx));
-    }
+    // if (non_hashed_tbl.columns[col_id_of_non_hashed].pages.size() < PARALLEL_PROBE_THRESHOLD
+    // || tbl_l.columns[l_col_id].type == DataType::VARCHAR) {
+    SingleThreadedProbe<T>(tbl_l,
+        tbl_r,
+        col_id_of_non_hashed,
+        l_col_id,
+        r_col_id,
+        tbl,
+        results,
+        output_attrs,
+        hashed_is_left);
+    // } else {
+    //     ParallelProbe(tbl_l,
+    //         tbl_r,
+    //         col_id_of_non_hashed,
+    //         l_col_id,
+    //         r_col_id,
+    //         &tbl,
+    //         results,
+    //         output_attrs,
+    //         hashed_is_left,
+    //         static_cast<ExecContext*>(ctx));
+    // }
 }
 
 void ProbeStr(SensibleColumnarTable&                      tbl_l,
