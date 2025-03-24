@@ -138,14 +138,13 @@ inline uint16_t NonBatchProbe(T*                     data,
     bool                                             hashed_is_left,
     uint8_t*                                         bitmap) {
     uint16_t non_null_id = page_start_non_null_id;
-    uint16_t dest_cnt    = page_start_non_null_id + to_test;
     uint16_t page_id     = page_start_id;
 
-    while (non_null_id < dest_cnt) {
+    for (uint16_t i = 0; i < to_test; i += 1) {
         uint16_t byte_id = (page_id & ~bottom_three_bits_mask) >> 3;
         uint16_t bit_id  = page_id & bottom_three_bits_mask;
         if ((bitmap[byte_id] & (1 << bit_id)) != 0) {
-            size_t global_id = global_id_offset + page_id;
+            size_t global_id = global_id_offset + i;
             T&     key       = data[non_null_id++];
             ProbeAndCollect(hash_tbl,
                 key,
@@ -175,14 +174,13 @@ inline void NonBatchProbeStr(uint16_t                     page_start_id,
     uint16_t*                                             curr_str_begin,
     uint16_t*                                             non_null_id,
     uint16_t                                              str_base_offset) {
-    uint16_t dest_cnt = *non_null_id + to_test;
     uint16_t page_id  = page_start_id;
 
-    while (*non_null_id < dest_cnt) {
+    for (uint16_t i = 0; i < to_test; i += 1) {
         uint16_t byte_id = (page_id & ~bottom_three_bits_mask) >> 3;
         uint16_t bit_id  = page_id & bottom_three_bits_mask;
         if ((bitmap[byte_id] & (1 << bit_id)) != 0) {
-            size_t global_id = page_start_id + page_id;
+            size_t global_id = page_start_id + i;
             ProbeAndCollectStr(hash_tbl,
                 tbl_l,
                 tbl_r,
@@ -218,12 +216,12 @@ void ProbePage(SensibleColumnarTable*                tbl_l,
     size_t                 total_cnt       = regular_info->rows_in_page;
     T*                     data            = DataBegin<T>(page);
 
-    size_t   non_null_id   = 0;
     size_t   global_id     = rows_in_prev_pages;
     uint16_t intra_page_id = 0;
+    size_t   non_null_id   = 0;
 
     if (total_cnt == non_null_cnt) {
-        for (size_t i = 0; i < non_null_cnt; i += 1) {
+        for (size_t i = 0; i < total_cnt; i += 1) {
             T& key = data[non_null_id++];
             ProbeAndCollect(hash_tbl,
                 key,
@@ -233,11 +231,11 @@ void ProbePage(SensibleColumnarTable*                tbl_l,
                 hashed_is_left,
                 global_id,
                 output_attrs);
-            global_id++;
+			global_id++;
         }
     } else {
-        size_t   batch_cnt = non_null_cnt / batch_size;
-        size_t   remaining = non_null_cnt % batch_size;
+        size_t   batch_cnt = total_cnt / batch_size;
+        size_t   remaining = total_cnt % batch_size;
         uint8_t* bitmap    = BitMapBegin(page, regular_info);
 
         uint16_t cur_bitmap_offset = 0;
@@ -324,7 +322,7 @@ void ProbePageStr(SensibleColumnarTable*                  tbl_l,
     uint16_t intra_page_id  = 0;
     uint16_t curr_str_begin = str_base_offset;
     if (total_cnt == non_null_cnt) {
-        for (size_t i = 0; i < non_null_cnt; i += 1) {
+        for (size_t i = 0; i < total_cnt; i += 1) {
             ProbeAndCollectStr(hash_tbl,
                 tbl_l,
                 tbl_r,
@@ -339,8 +337,8 @@ void ProbePageStr(SensibleColumnarTable*                  tbl_l,
             global_id++;
         }
     } else {
-        size_t   batch_cnt = non_null_cnt / batch_size;
-        size_t   remaining = non_null_cnt % batch_size;
+        size_t   batch_cnt = total_cnt / batch_size;
+        size_t   remaining = total_cnt % batch_size;
         uint8_t* bitmap    = BitMapBegin(page, regular_info);
 
         uint16_t cur_bitmap_offset = 0;

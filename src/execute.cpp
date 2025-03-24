@@ -89,7 +89,7 @@ void BuildHashTbl(SensibleColumnarTable&        input_tbl,
                 if (bitmap_begin[cur_bitmap_id] == u8_max
                     && (regular_info.non_null_in_page - processed >= 8)) {
                     // Full byte not null
-                    for (size_t i = 0; i < 8; i += 1) {
+                    for (size_t k = 0; k < 8; k += 1) {
                         InsertToHashmap<T>(tbl, data[processed++], id);
                         id++;
                     }

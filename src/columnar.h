@@ -371,7 +371,6 @@ static void AppendNull(SensibleColumn& clm) {
 
     uint16_t* page_u16 = reinterpret_cast<uint16_t*>(page->page);
     page_u16[0]++;
-    page->page_info.regular.rows_in_page++;
 
     uint8_t* bitmap_start = BitMapBegin(page->page, &page->page_info.regular);
     if (will_need_new_bitmap_byte) {
@@ -382,6 +381,7 @@ static void AppendNull(SensibleColumn& clm) {
     uint8_t  bit_id  = page->page_info.regular.rows_in_page & bottom_three_bits_mask;
     bitmap_start[byte_id] &= ~(1 << bit_id);
 
+    page->page_info.regular.rows_in_page++;
     page->page_info.regular.curr_free_slots_in_last_bitmap_byte -= 1;
 }
 
