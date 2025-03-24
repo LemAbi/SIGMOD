@@ -191,8 +191,8 @@ static void WorkerEventLoop(uint32_t thread_id, ExecContext* ctx) {
                 std::atomic_load_explicit(work_count, std::memory_order_relaxed);
             if (possibly_available_items != 0) {
                 if (q_lck->try_lock()) {
-                    if (!ctx->work_stack.empty()) {
-                        WorkItem allocated_work = ctx->work_stack.back();
+                    if (ctx->work_stack.size() > 0) {
+                        WorkItem allocated_work = ctx->work_stack[ctx->work_stack.size() - 1];
                         ctx->work_stack.pop_back();
                         std::atomic_fetch_sub_explicit(work_count,
                             1,

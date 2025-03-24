@@ -300,6 +300,9 @@ void ParallelProbe(SensibleColumnarTable&            tbl_l,
 
         for (size_t t_id = 0; t_id < thread_cnt; t_id += 1) {
             size_t pages_for_this_thread = std::min(remaining_pages, pages_per_thread);
+            if (pages_for_this_thread == 0) {
+                break;
+            }
 
             WorkItem tasklet;
             tasklet.work_type                       = WorkItemType::Join_Probe;
@@ -307,7 +310,7 @@ void ParallelProbe(SensibleColumnarTable&            tbl_l,
             tasklet.work_info.result                = &worker_results;
             tasklet.work_info.in_left               = &tbl_l;
             tasklet.work_info.in_right              = &tbl_r;
-            tasklet.work_info.hash_tbl              = &tbl;
+            tasklet.work_info.hash_tbl              = tbl;
             tasklet.work_info.tasklet_done_ctr      = &finished_tasklets;
             tasklet.work_info.join_col_id_left      = l_col_id;
             tasklet.work_info.join_col_id_right     = r_col_id;
@@ -315,16 +318,18 @@ void ParallelProbe(SensibleColumnarTable&            tbl_l,
 
             tasklet.work_info.our_pages = {};
             tasklet.work_info.our_pages.reserve(pages_for_this_thread);
-            for (size_t i = 0; i < pages_per_thread; i += 1) {
-                Page*                  cur_page     = clm_to_check.pages[i].page;
-                PageDescriptor*        page_info    = &clm_to_check.pages[i].page_info;
+            for (size_t i = 0; i < pages_for_this_thread; i += 1) {
+                Page*                  cur_page  = clm_to_check.pages[curr_page_id].page;
+                PageDescriptor*        page_info = &clm_to_check.pages[curr_page_id].page_info;
                 RegularPageDescriptor& regular_info = page_info->regular;
 
                 // TODO: see note at fn top -> switch over type and page type and for varchar +
                 // big str page -> handle it here ourselfes and skip page
                 tasklet.work_info.our_pages.push_back(
                     {cur_page, page_info, rows_in_prev_pages});
+
                 rows_in_prev_pages += regular_info.rows_in_page;
+                curr_page_id++;
             }
             remaining_pages -= pages_for_this_thread;
 
@@ -346,13 +351,16 @@ void ParallelProbe(SensibleColumnarTable&            tbl_l,
     while (std::atomic_load_explicit(&finished_tasklets, std::memory_order_relaxed)
            < tasklets_enqd) {
         ctx->work_access_lck.lock();
-        WorkItem allocated_work = ctx->work_stack.back();
-        ctx->work_stack.pop_back();
-        std::atomic_fetch_sub_explicit(&ctx->work_item_count, 1, std::memory_order_relaxed);
-        ctx->work_access_lck.unlock();
+        if (ctx->work_stack.size() > 0) {
+            WorkItem allocated_work = ctx->work_stack[ctx->work_stack.size() - 1];
+            ctx->work_stack.pop_back();
+            std::atomic_fetch_sub_explicit(&ctx->work_item_count, 1, std::memory_order_relaxed);
+            ctx->work_access_lck.unlock();
 
-        ExecuteWork(allocated_work, thread_cnt - 1);
-        std::atomic_fetch_add_explicit(&finished_tasklets, 1, std::memory_order_relaxed);
+            ExecuteWork(allocated_work, thread_cnt - 1);
+        } else {
+            ctx->work_access_lck.unlock();
+        }
     }
 
     // Sync output tbl results
@@ -368,13 +376,15 @@ void ParallelProbe(SensibleColumnarTable&            tbl_l,
         for (size_t i = 0; i < thread_cnt; i += 1) {
             total_page_cnt += worker_results[i].columns[c_id].pages.size();
         }
-        results.columns[c_id].pages.resize(total_page_cnt);
+        results.columns[c_id].pages.reserve(total_page_cnt);
+
         for (size_t i = 0; i < thread_cnt; i += 1) {
             size_t pages_from_this_thread = worker_results[i].columns[c_id].pages.size();
             for (size_t p_id = 0; p_id < pages_from_this_thread; p_id += 1) {
                 results.columns[c_id].pages.push_back(
                     worker_results[i].columns[c_id].pages[p_id]);
             }
+            worker_results[i].columns[c_id].pages.clear();
         }
     }
 }
@@ -394,29 +404,29 @@ void Probe(SensibleColumnarTable&                    tbl_l,
     SensibleColumnarTable& non_hashed_tbl = hashed_is_left ? tbl_r : tbl_l;
     // TODO: switch to parallel probe also for str path - disabled here since we currently dont
     // handle big str pages correctly - sec comment on paraprobe fn
-    // if (non_hashed_tbl.columns[col_id_of_non_hashed].pages.size() < PARALLEL_PROBE_THRESHOLD
-    // || tbl_l.columns[l_col_id].type == DataType::VARCHAR) {
-    SingleThreadedProbe<T>(tbl_l,
-        tbl_r,
-        col_id_of_non_hashed,
-        l_col_id,
-        r_col_id,
-        tbl,
-        results,
-        output_attrs,
-        hashed_is_left);
-    // } else {
-    //     ParallelProbe(tbl_l,
-    //         tbl_r,
-    //         col_id_of_non_hashed,
-    //         l_col_id,
-    //         r_col_id,
-    //         &tbl,
-    //         results,
-    //         output_attrs,
-    //         hashed_is_left,
-    //         static_cast<ExecContext*>(ctx));
-    // }
+    if (non_hashed_tbl.columns[col_id_of_non_hashed].pages.size() < PARALLEL_PROBE_THRESHOLD
+        || tbl_l.columns[l_col_id].type == DataType::VARCHAR) {
+        SingleThreadedProbe<T>(tbl_l,
+            tbl_r,
+            col_id_of_non_hashed,
+            l_col_id,
+            r_col_id,
+            tbl,
+            results,
+            output_attrs,
+            hashed_is_left);
+    } else {
+        ParallelProbe(tbl_l,
+            tbl_r,
+            col_id_of_non_hashed,
+            l_col_id,
+            r_col_id,
+            &tbl,
+            results,
+            output_attrs,
+            hashed_is_left,
+            static_cast<ExecContext*>(ctx));
+    }
 }
 
 void ProbeStr(SensibleColumnarTable&                      tbl_l,
