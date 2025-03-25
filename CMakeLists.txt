@@ -6,7 +6,18 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=address -g")
+
 Include(FetchContent)
+
+# FetchContent_Declare (
+#     tracy
+#     GIT_REPOSITORY https://github.com/wolfpld/tracy.git
+#     GIT_TAG master
+#     GIT_SHALLOW TRUE
+#     GIT_PROGRESS TRUE
+# )
+# FetchContent_MakeAvailable(tracy)
 
 FetchContent_Declare(
     Catch2
@@ -63,6 +74,7 @@ FetchContent_Declare(
     duckdb
     URL https://github.com/duckdb/duckdb/archive/refs/tags/v1.2.0.tar.gz
 )
+
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "ppc|powerpc|ppc64|ppc64le")
     message("Disabling jemalloc extension of DuckDB on Power.")
     set(SKIP_EXTENSIONS jemalloc)
@@ -80,6 +92,7 @@ add_executable(
 )
 
 target_include_directories(run PRIVATE include)
+# target_link_libraries(run PRIVATE re2 fmt range-v3 nlohmann_json::nlohmann_json sqlparser duckdb TracyClient)
 target_link_libraries(run PRIVATE re2 fmt range-v3 nlohmann_json::nlohmann_json sqlparser duckdb)
 target_compile_definitions(run PRIVATE -D_CRT_SECURE_NO_WARNINGS)
 
