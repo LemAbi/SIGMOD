@@ -127,7 +127,6 @@ inline void BatchProbeStr(size_t                          start_id,
 template <typename T>
 inline uint16_t NonBatchProbe(T*                     data,
     size_t                                           global_id_offset,
-    uint16_t                                         page_start_id,
     uint16_t                                         page_start_non_null_id,
     uint16_t                                         to_test,
     SensibleColumnarTable*                           tbl_l,
@@ -138,11 +137,10 @@ inline uint16_t NonBatchProbe(T*                     data,
     bool                                             hashed_is_left,
     uint8_t*                                         bitmap) {
     uint16_t non_null_id = page_start_non_null_id;
-    uint16_t page_id     = page_start_id;
 
     for (uint16_t i = 0; i < to_test; i += 1) {
-        uint16_t byte_id = (page_id & ~bottom_three_bits_mask) >> 3;
-        uint16_t bit_id  = page_id & bottom_three_bits_mask;
+        uint16_t byte_id = (i & ~bottom_three_bits_mask) >> 3;
+        uint16_t bit_id  = i & bottom_three_bits_mask;
         if ((bitmap[byte_id] & (1 << bit_id)) != 0) {
             size_t global_id = global_id_offset + i;
             T&     key       = data[non_null_id++];
@@ -155,13 +153,11 @@ inline uint16_t NonBatchProbe(T*                     data,
                 global_id,
                 output_attrs);
         }
-        page_id++;
     }
     return non_null_id;
 }
 
-inline void NonBatchProbeStr(uint16_t                     page_start_id,
-    size_t                                                global_id_offset,
+inline void NonBatchProbeStr(size_t                       global_id_offset,
     uint16_t                                              to_test,
     SensibleColumnarTable*                                tbl_l,
     SensibleColumnarTable*                                tbl_r,
@@ -174,13 +170,11 @@ inline void NonBatchProbeStr(uint16_t                     page_start_id,
     uint16_t*                                             curr_str_begin,
     uint16_t*                                             non_null_id,
     uint16_t                                              str_base_offset) {
-    uint16_t page_id = page_start_id;
-
     for (uint16_t i = 0; i < to_test; i += 1) {
-        uint16_t byte_id = (page_id & ~bottom_three_bits_mask) >> 3;
-        uint16_t bit_id  = page_id & bottom_three_bits_mask;
+        uint16_t byte_id = (i & ~bottom_three_bits_mask) >> 3;
+        uint16_t bit_id  = i & bottom_three_bits_mask;
         if ((bitmap[byte_id] & (1 << bit_id)) != 0) {
-            size_t global_id = page_start_id + i;
+            size_t global_id = global_id_offset + i;
             ProbeAndCollectStr(hash_tbl,
                 tbl_l,
                 tbl_r,
@@ -193,7 +187,6 @@ inline void NonBatchProbeStr(uint16_t                     page_start_id,
                 curr_str_begin,
                 str_base_offset);
         }
-        page_id++;
     }
 }
 
@@ -216,9 +209,8 @@ void ProbePage(SensibleColumnarTable*                tbl_l,
     size_t                 total_cnt       = regular_info->rows_in_page;
     T*                     data            = DataBegin<T>(page);
 
-    size_t   global_id     = rows_in_prev_pages;
-    uint16_t intra_page_id = 0;
-    size_t   non_null_id   = 0;
+    size_t global_id   = rows_in_prev_pages;
+    size_t non_null_id = 0;
 
     if (total_cnt == non_null_cnt) {
         for (size_t i = 0; i < total_cnt; i += 1) {
@@ -264,7 +256,6 @@ void ProbePage(SensibleColumnarTable*                tbl_l,
             } else {
                 non_null_id = NonBatchProbe<T>(data,
                     global_id,
-                    intra_page_id,
                     non_null_id,
                     batch_size,
                     tbl_l,
@@ -275,14 +266,12 @@ void ProbePage(SensibleColumnarTable*                tbl_l,
                     hashed_is_left,
                     &bitmap[cur_bitmap_offset]);
             }
-            intra_page_id     += batch_size;
             global_id         += batch_size;
             cur_bitmap_offset += bytes_per_batch;
         }
 
         non_null_id = NonBatchProbe<T>(data,
             global_id,
-            intra_page_id,
             non_null_id,
             remaining,
             tbl_l,
@@ -319,7 +308,6 @@ void ProbePageStr(SensibleColumnarTable*                  tbl_l,
 
     uint16_t non_null_id    = 0;
     size_t   global_id      = rows_in_prev_pages;
-    uint16_t intra_page_id  = 0;
     uint16_t curr_str_begin = str_base_offset;
     if (total_cnt == non_null_cnt) {
         for (size_t i = 0; i < total_cnt; i += 1) {
@@ -366,8 +354,7 @@ void ProbePageStr(SensibleColumnarTable*                  tbl_l,
                     &non_null_id,
                     str_base_offset);
             } else {
-                NonBatchProbeStr(intra_page_id,
-                    global_id,
+                NonBatchProbeStr(global_id,
                     batch_size,
                     tbl_l,
                     tbl_r,
@@ -381,13 +368,11 @@ void ProbePageStr(SensibleColumnarTable*                  tbl_l,
                     &non_null_id,
                     str_base_offset);
             }
-            intra_page_id     += batch_size;
             global_id         += batch_size;
             cur_bitmap_offset += bytes_per_batch;
         }
 
-        NonBatchProbeStr(intra_page_id,
-            global_id,
+        NonBatchProbeStr(global_id,
             remaining,
             tbl_l,
             tbl_r,
